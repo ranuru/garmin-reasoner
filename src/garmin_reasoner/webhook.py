@@ -11,7 +11,6 @@ background task so Garmin never waits on us.
 """
 
 import logging
-from collections.abc import Awaitable, Callable
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -23,21 +22,11 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response
 
 from garmin_reasoner import db, storage
+from garmin_reasoner.oauth import NoAccessTokenError, TokenProvider
 
 log = logging.getLogger(__name__)
 
 GARMIN_API_HOST = "apis.garmin.com"
-
-# Given a Garmin user ID, return a valid access token for calling Garmin's API.
-TokenProvider = Callable[[str], Awaitable[str]]
-
-
-class NoAccessTokenError(Exception):
-    pass
-
-
-async def no_access_token(user_id: str) -> str:
-    raise NoAccessTokenError(f"no access token available for user {user_id}")
 
 
 @dataclass(frozen=True)
@@ -83,12 +72,18 @@ async def process_notification(ctx: WebhookContext, body: dict[str, Any]) -> Non
                     log.warning("dropping %r entry for unknown user %r", summary_type, user_id)
                     continue
 
+                if summary_type == "deregistrations":
+                    storage.delete_user(conn, user_id)
+                    known_users.discard(user_id)
+                    log.info("user %r deregistered via Garmin", user_id)
+                    continue
+
                 if "callbackURL" in entry:
                     summaries = await fetch_ping(ctx, summary_type, entry)
                 elif "summaryId" in entry:
                     summaries = [entry]
                 else:
-                    # e.g. deregistrations / permission changes; not handled yet.
+                    # e.g. userPermissionsChange; not handled yet.
                     log.info("unhandled %r notification for user %r", summary_type, user_id)
                     continue
 

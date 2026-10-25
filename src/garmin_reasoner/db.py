@@ -33,6 +33,23 @@ MIGRATIONS: list[str] = [
         connected_at TEXT NOT NULL      -- ISO 8601 UTC
     );
     """,
+    # 3: OAuth. Tokens go away with their user; states are single-use PKCE verifiers
+    # for authorization flows that haven't reached /callback yet.
+    """
+    CREATE TABLE tokens (
+        user_id            TEXT PRIMARY KEY REFERENCES users (user_id) ON DELETE CASCADE,
+        access_token       TEXT    NOT NULL,
+        refresh_token      TEXT    NOT NULL,
+        access_expires_at  INTEGER NOT NULL,  -- epoch seconds
+        refresh_expires_at INTEGER,           -- epoch seconds, if Garmin reports it
+        updated_at         TEXT    NOT NULL   -- ISO 8601 UTC
+    );
+    CREATE TABLE oauth_states (
+        state         TEXT    PRIMARY KEY,
+        code_verifier TEXT    NOT NULL,
+        created_at    INTEGER NOT NULL  -- epoch seconds
+    );
+    """,
 ]
 
 

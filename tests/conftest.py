@@ -4,7 +4,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from fakes import ACCESS_TOKEN, USER_ID, FakeGarminAPI
+from fakes import ACCESS_TOKEN, ADMIN_PASSWORD, USER_ID, FakeGarminAPI
 from fastapi.testclient import TestClient
 
 from garmin_reasoner import db, storage
@@ -20,6 +20,7 @@ def settings(tmp_path: Path) -> Settings:
         garmin_client_id="test-client-id",
         garmin_client_secret="test-client-secret",
         redirect_uri="https://example.ts.net/callback",
+        admin_password=ADMIN_PASSWORD,
         database_path=tmp_path / "test.db",
     )
 
@@ -71,3 +72,8 @@ def make_client(
 @pytest.fixture
 def client(make_client: Callable[..., TestClient]) -> TestClient:
     return make_client()
+
+
+@pytest.fixture
+def admin_auth() -> tuple[str, str]:
+    return ("admin", ADMIN_PASSWORD)

@@ -12,8 +12,6 @@ import pytest
 from fakes import ACCESS_TOKEN, USER_ID, FakeGarminAPI
 from fastapi.testclient import TestClient
 
-from garmin_reasoner import webhook
-
 pytestmark = pytest.mark.usefixtures("known_user")
 
 CALLBACK_URL = (
@@ -89,7 +87,7 @@ def test_malformed_entries_are_skipped(client: TestClient, conn: sqlite3.Connect
     body = {
         "dailies": [daily("d1"), "not-an-object", {"userId": USER_ID}],
         "sleeps": "not-a-list",
-        "deregistrations": [{"userId": USER_ID}],
+        "userPermissionsChange": [{"userId": USER_ID, "permissions": []}],
     }
     response = client.post("/garmin/webhook", json=body)
 
@@ -175,10 +173,22 @@ def test_ping_without_token_is_logged_not_fatal(
     garmin_api: FakeGarminAPI,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    client = make_client(token_provider=webhook.no_access_token)
+    # The real token manager, with no tokens stored for the user.
+    client = make_client(token_provider=None)
 
     response = client.post("/garmin/webhook", json=ping())
 
     assert response.status_code == 200
     assert garmin_api.requests == []
     assert "failed to fetch 'dailies' ping callback" in caplog.text
+
+
+def test_deregistration_forgets_user_but_keeps_data(
+    client: TestClient, conn: sqlite3.Connection
+) -> None:
+    client.post("/garmin/webhook", json={"dailies": [daily("d1")]})
+    client.post("/garmin/webhook", json={"deregistrations": [{"userId": USER_ID}]})
+    client.post("/garmin/webhook", json={"dailies": [daily("d2")]})
+
+    assert conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
+    assert stored(conn) == [("dailies", "d1")]
