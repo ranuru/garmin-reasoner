@@ -73,7 +73,7 @@ def create_app(
 
     # Last, so FastAPI's own routes win: serves /mcp plus the OAuth endpoints
     # (/authorize, /token, /register, /revoke, /.well-known/...).
-    app.mount("/", mcp_app)
+    app.mount("/", mcp_auth.BasicAuthForPostClients(mcp_app, provider))
     return app
 
 

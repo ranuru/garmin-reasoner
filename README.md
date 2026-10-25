@@ -71,9 +71,17 @@ uv run uvicorn garmin_reasoner.main:create_app --factory --reload
      -d '{"start": "2025-07-01", "end": "2026-07-27"}'
    ```
 
-6. **Add to Claude.** In claude.ai → Settings → Connectors → Add custom connector, use
-   `https://<host>.<tailnet>.ts.net/mcp`. Claude registers itself and opens `/mcp-login`.
-   Check that it names Claude and a `claude.ai` callback, then enter the admin password.
+6. **Add to Claude.** Create an OAuth client on the server:
+
+   ```sh
+   docker compose exec garmin-reasoner python -m garmin_reasoner.mcp_clients create
+   ```
+
+   In claude.ai → Settings → Connectors → Add custom connector, use the URL
+   `https://<host>.<tailnet>.ts.net/mcp`. Paste the printed Client ID and Secret under
+   **Advanced settings**. When you connect, `/mcp-login` opens: check that it names Claude
+   and a `claude.ai` callback, then enter the admin password. (`... mcp_clients list` /
+   `delete <id>` manage clients; deleting one revokes its tokens.)
 
 ## Operations
 

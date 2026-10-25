@@ -1,7 +1,8 @@
 """OAuth authorization server for the MCP endpoint.
 
 claude.ai's custom connector is the OAuth client: it registers itself (dynamic client
-registration), sends me to `/authorize`, and exchanges the resulting code for tokens.
+registration) or uses an ID and secret created with `python -m garmin_reasoner.mcp_clients`,
+sends me to `/authorize`, and exchanges the resulting code for tokens.
 The MCP SDK implements those protocol endpoints and their checks (PKCE, code expiry,
 redirect URI matching, scopes); this module supplies storage and policy:
 
@@ -12,6 +13,7 @@ redirect URI matching, scopes); this module supplies storage and policy:
 - Codes and tokens are stored hashed. Refresh tokens rotate on use.
 """
 
+import base64
 import hashlib
 import html
 import json
@@ -22,7 +24,7 @@ import time
 from collections import deque
 from contextlib import closing
 from pathlib import Path
-from urllib.parse import parse_qs, urlencode
+from urllib.parse import parse_qs, unquote, urlencode
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -36,6 +38,7 @@ from mcp.server.auth.provider import (
     construct_redirect_uri,
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from garmin_reasoner import db
 from garmin_reasoner.garmin import Clock
@@ -280,6 +283,63 @@ class SQLiteOAuthProvider:
             return False
         conn.execute("DELETE FROM mcp_tokens WHERE grant_id = ?", (row["grant_id"],))
         return True
+
+
+class BasicAuthForPostClients:
+    """ASGI wrapper: lets `client_secret_post` clients authenticate with HTTP Basic too.
+
+    Our metadata advertises both methods, and a client given an ID and secret by hand
+    (see `mcp_clients.py`) may use either, but the SDK only accepts the one method a
+    client was registered with. For such clients, this rewrites an `Authorization: Basic`
+    header on `POST /token` into the equivalent `client_id`/`client_secret` form fields.
+    Clients registered with `client_secret_basic` are passed through untouched.
+    """
+
+    def __init__(self, app: ASGIApp, provider: SQLiteOAuthProvider) -> None:
+        self._app = app
+        self._provider = provider
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or scope["method"] != "POST" or scope["path"] != "/token":
+            return await self._app(scope, receive, send)
+        headers = dict(scope["headers"])
+        authorization = headers.get(b"authorization", b"").decode("latin-1")
+        if not authorization.lower().startswith("basic "):
+            return await self._app(scope, receive, send)
+        try:
+            decoded = base64.b64decode(authorization[6:].strip(), validate=True).decode()
+            client_id, client_secret = (unquote(part) for part in decoded.split(":", 1))
+        except (ValueError, UnicodeDecodeError):
+            return await self._app(scope, receive, send)
+        client = await self._provider.get_client(client_id)
+        if client is None or client.token_endpoint_auth_method != "client_secret_post":
+            return await self._app(scope, receive, send)
+
+        body = b""
+        while True:
+            message = await receive()
+            body += message.get("body", b"")
+            if not message.get("more_body"):
+                break
+        form = parse_qs(body.decode(), keep_blank_values=True)
+        form.setdefault("client_id", [client_id])
+        form.setdefault("client_secret", [client_secret])
+        new_body = urlencode(form, doseq=True).encode()
+
+        new_headers = [
+            (k, v) for k, v in scope["headers"] if k not in (b"authorization", b"content-length")
+        ]
+        new_headers.append((b"content-length", str(len(new_body)).encode()))
+        sent = False
+
+        async def replay() -> Message:
+            nonlocal sent
+            if sent:
+                return await receive()
+            sent = True
+            return {"type": "http.request", "body": new_body, "more_body": False}
+
+        await self._app({**scope, "headers": new_headers}, replay, send)
 
 
 class LoginThrottle:
