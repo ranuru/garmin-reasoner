@@ -11,7 +11,7 @@ from garmin_reasoner.config import Settings
 
 
 def test_backup_is_a_readable_copy(settings: Settings, conn: sqlite3.Connection) -> None:
-    storage.upsert_summary(conn, "dailies", {"summaryId": "d1"}, "u1", "t")
+    storage.upsert_summary(conn, "dailies", "d1", {}, "t", "2026-10-24")
 
     path = backup.backup_database(
         settings.database_path, settings.backup_dir, keep=3, now=datetime(2026, 10, 25, tzinfo=UTC)
@@ -35,26 +35,18 @@ def test_backup_keeps_newest(settings: Settings, conn: sqlite3.Connection) -> No
 
 
 @pytest.mark.anyio
-async def test_jobs_keep_running_after_a_failure() -> None:
-    calls: list[str] = []
+async def test_job_keeps_running_after_a_failure() -> None:
+    calls = 0
 
-    async def broken() -> None:
-        calls.append("broken")
-        raise RuntimeError("boom")
+    async def flaky() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("boom")
 
-    async def fine() -> None:
-        calls.append("fine")
-
-    task = asyncio.create_task(
-        jobs.run_periodically({"broken": broken, "fine": fine}, interval=0, initial_delay=0)
-    )
-    while len(calls) < 4:
+    task = asyncio.create_task(jobs.run_periodically("flaky", flaky, interval=0, initial_delay=0))
+    while calls < 3:
         await asyncio.sleep(0)
     task.cancel()
 
-    assert calls[:4] == ["broken", "fine", "broken", "fine"]
-
-
-@pytest.fixture
-def anyio_backend() -> str:
-    return "asyncio"
+    assert calls >= 3

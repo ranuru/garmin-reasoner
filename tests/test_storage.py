@@ -3,58 +3,53 @@ import sqlite3
 
 from garmin_reasoner import storage
 
-DAILY = {
-    "summaryId": "s1",
-    "userId": "u1",
-    "calendarDate": "2026-10-24",
-    "startTimeInSeconds": 1792800000,
-    "steps": 100,
-}
+DAILY = {"calendarDate": "2026-10-24", "movement": {"steps": {"value": 100}}}
 
 
 def rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute("SELECT * FROM summaries ORDER BY type, summary_id").fetchall()
 
 
-def test_upsert_extracts_columns_and_keeps_raw_json(conn: sqlite3.Connection) -> None:
-    storage.upsert_summary(conn, "dailies", DAILY, user_id="u1", received_at="t1")
+def test_upsert_stores_columns_and_raw_json(conn: sqlite3.Connection) -> None:
+    storage.upsert_summary(conn, "dailies", "2026-10-24", DAILY, "t1", "2026-10-24", 1792800000)
 
     [row] = rows(conn)
-    assert row["type"] == "dailies"
-    assert row["summary_id"] == "s1"
-    assert row["user_id"] == "u1"
+    assert (row["type"], row["summary_id"], row["user_id"]) == ("dailies", "2026-10-24", "self")
     assert row["calendar_date"] == "2026-10-24"
     assert row["start_time"] == 1792800000
     assert row["received_at"] == "t1"
     assert json.loads(row["raw_json"]) == DAILY
 
 
-def test_upsert_replaces_resent_summary(conn: sqlite3.Connection) -> None:
-    storage.upsert_summary(conn, "dailies", DAILY, user_id="u1", received_at="t1")
-    storage.upsert_summary(conn, "dailies", {**DAILY, "steps": 200}, user_id="u1", received_at="t2")
+def test_upsert_replaces_repulled_record(conn: sqlite3.Connection) -> None:
+    storage.upsert_summary(conn, "dailies", "2026-10-24", DAILY, "t1", "2026-10-24")
+    newer = {**DAILY, "movement": {"steps": {"value": 200}}}
+    storage.upsert_summary(conn, "dailies", "2026-10-24", newer, "t2", "2026-10-24")
 
     [row] = rows(conn)
-    assert json.loads(row["raw_json"])["steps"] == 200
+    assert json.loads(row["raw_json"]) == newer
     assert row["received_at"] == "t2"
 
 
-def test_same_summary_id_allowed_across_types(conn: sqlite3.Connection) -> None:
-    storage.upsert_summary(conn, "dailies", DAILY, user_id="u1", received_at="t")
-    storage.upsert_summary(conn, "sleeps", DAILY, user_id="u1", received_at="t")
+def test_same_id_allowed_across_types(conn: sqlite3.Connection) -> None:
+    storage.upsert_summary(conn, "dailies", "2026-10-24", DAILY, "t", "2026-10-24")
+    storage.upsert_summary(conn, "sleeps", "2026-10-24", DAILY, "t", "2026-10-24")
     assert [r["type"] for r in rows(conn)] == ["dailies", "sleeps"]
 
 
-def test_upsert_tolerates_missing_optional_fields(conn: sqlite3.Connection) -> None:
-    storage.upsert_summary(conn, "activities", {"summaryId": 42}, user_id="u1", received_at="t")
+def test_sync_state_only_moves_forward(conn: sqlite3.Connection) -> None:
+    assert storage.sync_state(conn) == {}
 
-    [row] = rows(conn)
-    assert row["summary_id"] == "42"
-    assert row["calendar_date"] is None
-    assert row["start_time"] is None
+    storage.record_sync_success(conn, "sleeps", "2026-10-20", "t1")
+    storage.record_sync_success(conn, "sleeps", "2026-10-10", "t2")  # older manual re-sync
+    storage.record_sync_error(conn, "sleeps", "HTTP 500", "t3")
 
-
-def test_known_user_ids(conn: sqlite3.Connection) -> None:
-    assert storage.known_user_ids(conn) == set()
-    storage.add_user(conn, "u1", "t")
-    storage.add_user(conn, "u1", "t")  # idempotent
-    assert storage.known_user_ids(conn) == {"u1"}
+    assert storage.sync_state(conn) == {
+        "sleeps": {
+            "feed": "sleeps",
+            "synced_through": "2026-10-20",
+            "last_success_at": "t2",
+            "last_error": "HTTP 500",
+            "last_error_at": "t3",
+        }
+    }

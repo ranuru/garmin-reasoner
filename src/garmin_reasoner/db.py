@@ -91,6 +91,22 @@ MIGRATIONS: list[str] = [
         PRIMARY KEY (user_id, type, calendar_date)
     );
     """,
+    # 6: switch from Garmin's partner API (OAuth + webhooks) to the Personal API (API key,
+    # pull only). Garmin user/token bookkeeping and backfill tracking go; sync progress
+    # per feed replaces them.
+    """
+    DROP TABLE backfill_requests;
+    DROP TABLE oauth_states;
+    DROP TABLE tokens;
+    DROP TABLE users;
+    CREATE TABLE sync_state (
+        feed            TEXT PRIMARY KEY,
+        synced_through  TEXT,  -- YYYY-MM-DD: every day up to here has been pulled
+        last_success_at TEXT,  -- ISO 8601 UTC
+        last_error      TEXT,
+        last_error_at   TEXT
+    );
+    """,
 ]
 
 

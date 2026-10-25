@@ -1,1 +1,1 @@
-"""Garmin Connect data pipeline: webhook receiver, SQLite storage, and MCP server."""
+"""Garmin Connect data pipeline: Personal API sync, SQLite storage, and MCP server."""

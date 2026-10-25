@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # Expose the app (listening on 127.0.0.1:8000) through the host's Tailscale.
 #
-# - Funnel (public internet, port 443): only the paths Garmin and claude.ai must reach.
+# - Funnel (public internet, port 443): only the paths claude.ai must reach.
 # - Serve (tailnet only, port 8443): admin routes. Never put these on Funnel.
 #
 # Run once on the home server; the config persists across reboots. Check the result
@@ -12,8 +12,6 @@ set -eu
 TARGET="http://127.0.0.1:8000"
 
 PUBLIC_PATHS="
-/callback
-/garmin/webhook
 /mcp
 /mcp-login
 /authorize
@@ -25,7 +23,6 @@ PUBLIC_PATHS="
 "
 
 ADMIN_PATHS="
-/connect
 /admin
 "
 

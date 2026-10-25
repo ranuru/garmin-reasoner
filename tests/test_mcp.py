@@ -1,6 +1,9 @@
 """End-to-end tests of the MCP endpoint as claude.ai's custom connector would use it:
 register -> authorize -> log in -> token -> call tools."""
 
+import base64
+import hashlib
+import secrets
 import sqlite3
 from collections.abc import Callable
 from typing import Any
@@ -8,13 +11,20 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
-from fakes import ADMIN_PASSWORD, PUBLIC_BASE_URL, USER_ID
+from fakes import ADMIN_PASSWORD, PUBLIC_BASE_URL, FakeClock
 from fastapi.testclient import TestClient
 
-from garmin_reasoner import oauth, storage
+from garmin_reasoner import storage
 
 REDIRECT_URI = "https://claude.ai/api/mcp/auth_callback"
-VERIFIER = oauth.make_code_verifier()
+
+
+def code_challenge(verifier: str) -> str:
+    digest = hashlib.sha256(verifier.encode()).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
+VERIFIER = secrets.token_urlsafe(64)
 MCP_HEADERS = {"Accept": "application/json, text/event-stream"}
 
 
@@ -38,7 +48,7 @@ def start_authorization(client: TestClient, client_id: str) -> str:
             "response_type": "code",
             "client_id": client_id,
             "redirect_uri": REDIRECT_URI,
-            "code_challenge": oauth.code_challenge(VERIFIER),
+            "code_challenge": code_challenge(VERIFIER),
             "code_challenge_method": "S256",
             "state": "claude-state",
             "scope": "read",
@@ -147,16 +157,16 @@ def test_mcp_requires_bearer_token(client: TestClient) -> None:
 # --- the flow ---
 
 
-def test_full_connector_flow_and_tool_call(
-    client: TestClient, conn: sqlite3.Connection, known_user: str
-) -> None:
+def test_full_connector_flow_and_tool_call(client: TestClient, conn: sqlite3.Connection) -> None:
     storage.upsert_summary(
         conn,
         "dailies",
-        {"summaryId": "d1", "userId": USER_ID, "calendarDate": "2026-10-20", "steps": 9000},
-        USER_ID,
+        "2026-10-20",
+        {"calendarDate": "2026-10-20", "userProfilePk": 1, "steps": 9000},
         "t",
+        "2026-10-20",
     )
+    storage.record_sync_success(conn, "dailies", "2026-10-21", "2026-10-21T10:00:00+00:00")
     _, tokens = connect_claude(client)
     token = tokens["access_token"]
     assert tokens["scope"] == "read"
@@ -172,7 +182,8 @@ def test_full_connector_flow_and_tool_call(
         "get_hrv",
         "get_activities",
         "get_stress",
-        "get_summaries",
+        "get_body_battery",
+        "get_weight",
     }
     assert all(t["annotations"]["readOnlyHint"] for t in listed)
 
@@ -182,9 +193,12 @@ def test_full_connector_flow_and_tool_call(
     assert not result.get("isError")
     content = result["structuredContent"]
     assert content["count"] == 1
-    assert content["summaries"] == [
-        {"summaryId": "d1", "calendarDate": "2026-10-20", "steps": 9000}
-    ]
+    assert content["summaries"] == [{"calendarDate": "2026-10-20", "steps": 9000}]
+
+    overview = call_tool(client, token, "list_available_data", {})["structuredContent"]
+    assert overview["types"][0]["type"] == "dailies"
+    assert overview["sync"]["dailies"]["synced_through"] == "2026-10-21"
+    assert overview["garmin_api_key_expires"] is None
 
 
 def test_tool_rejects_oversized_range(client: TestClient) -> None:
@@ -239,8 +253,6 @@ def test_failed_logins_are_throttled(client: TestClient) -> None:
 
 
 def test_login_request_is_single_use_and_expires(make_client: Callable[..., TestClient]) -> None:
-    from test_oauth import FakeClock
-
     clock = FakeClock()
     client = make_client(clock=clock)
     client_id = register(client).json()["client_id"]
@@ -275,7 +287,7 @@ def test_code_requires_matching_verifier(client: TestClient) -> None:
             "code": code,
             "redirect_uri": REDIRECT_URI,
             "client_id": client_id,
-            "code_verifier": oauth.make_code_verifier(),
+            "code_verifier": secrets.token_urlsafe(64),
         },
     )
     assert response.status_code == 400
@@ -302,8 +314,6 @@ def test_refresh_rotates_tokens(client: TestClient) -> None:
 
 
 def test_access_token_expires(make_client: Callable[..., TestClient]) -> None:
-    from test_oauth import FakeClock
-
     clock = FakeClock()
     client = make_client(clock=clock)
     _, tokens = connect_claude(client)

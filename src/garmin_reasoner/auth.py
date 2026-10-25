@@ -1,8 +1,8 @@
 """Authentication for admin routes.
 
 HTTP Basic with a single shared password (`ADMIN_PASSWORD`); the username is ignored.
-Basic auth works with plain browser navigation, which `/connect` needs. This is defence
-in depth: admin routes are also meant to be reachable only over the tailnet.
+Basic auth keeps admin calls a one-liner with curl. This is defence in depth: admin
+routes are also meant to be reachable only over the tailnet.
 """
 
 import secrets

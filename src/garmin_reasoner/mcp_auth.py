@@ -38,7 +38,7 @@ from mcp.server.auth.provider import (
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
 from garmin_reasoner import db
-from garmin_reasoner.oauth import Clock
+from garmin_reasoner.garmin import Clock
 
 log = logging.getLogger(__name__)
 

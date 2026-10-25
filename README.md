@@ -1,22 +1,34 @@
 # garmin-reasoner
 
-Personal service that receives Garmin Connect data via webhooks, stores it as raw JSON in
-SQLite, and exposes it to Claude through a remote MCP server. See [CLAUDE.md](CLAUDE.md) for
-the architecture and build plan.
+Personal service that pulls my Garmin Connect data through Garmin's
+[Personal API](https://developer.garmin.com/gc-developer-program/personal/personal-api/),
+stores it as raw JSON in SQLite, and exposes it to Claude through a remote MCP server.
+See [CLAUDE.md](CLAUDE.md) for the architecture, and
+[docs/garmin-personal-api.json](docs/garmin-personal-api.json) for Garmin's OpenAPI spec.
 
 ## Routes
 
 | Route | Exposure | Purpose |
 | --- | --- | --- |
-| `POST /garmin/webhook` | Funnel (public) | Garmin push/ping notifications |
-| `GET /callback` | Funnel | Garmin OAuth redirect |
-| `/mcp` | Funnel | MCP server (streamable HTTP), bearer-token protected |
+| `/mcp` | Funnel (public) | MCP server (streamable HTTP), bearer-token protected |
 | `/authorize`, `/token`, `/register`, `/revoke`, `/.well-known/*`, `/mcp-login` | Funnel | OAuth server for the claude.ai connector |
-| `GET /connect` | tailnet only | Start linking your Garmin account (admin password) |
-| `POST /admin/backfill` | tailnet only | Request historical data, e.g. `{"summary_types": ["dailies"], "start": "2026-09-01", "end": "2026-09-30"}` |
-| `POST /admin/gap-check` | tailnet only | Backfill recently missed days now (also runs daily) |
-| `POST /admin/disconnect` | tailnet only | Deregister from Garmin and forget tokens (data is kept) |
+| `POST /admin/sync` | tailnet only | Pull a historical range, e.g. `{"start": "2025-10-01", "end": "2026-10-24"}` (optional `"feeds": [...]`) |
 | `GET /healthz` | container only | Health check |
+
+## Data synced
+
+| Feed | Garmin endpoint | Max range per request |
+| --- | --- | --- |
+| `dailies` | `usersummary-service/v2/dailysummaries` | 365 days |
+| `sleeps` | `sleep-service/sleep/dailySleepSummariesByDate` | 31 days |
+| `hrv` | `hrv-service/hrv/daily/{from}/{to}` | 28 days (undocumented) |
+| `stress` | `usersummary-service/stats/stress/daily/{start}/{end}` | 28 days |
+| `bodyBattery` | `wellness-service/wellness/bodyBattery/reports/daily` | 31 days |
+| `weight` | `weight-service/weight/range/{start}/{end}?includeAll=true` | 31 days (undocumented) |
+| `activities` | `activitylist-service/activities/search/activities` | 31 days, paged |
+
+The menstrual cycle and nutrition endpoints are deliberately not synced. Adding a feed
+takes one fetch function and one entry in `FEEDS` in `sync.py`.
 
 ## Development
 
@@ -32,10 +44,13 @@ uv run uvicorn garmin_reasoner.main:create_app --factory --reload
 
 ## Deploy (home server)
 
-1. **Configure.** `cp .env.example .env` and fill it in. `PUBLIC_BASE_URL` is the server's
-   Funnel URL (`https://<host>.<tailnet>.ts.net`). `ADMIN_PASSWORD` must be at least 16
-   characters. It guards the public `/mcp-login` page, so use a generated one.
-2. **Run.**
+1. **Create an API key.** In Garmin Connect on the web, go to Settings → Personal API Key.
+   Copy it into `.env` as `GARMIN_API_KEY` (it's shown only once), and put the expiry date
+   you chose in `GARMIN_API_KEY_EXPIRES`.
+2. **Configure the rest.** `cp .env.example .env` and fill it in. `PUBLIC_BASE_URL` is the
+   server's Funnel URL (`https://<host>.<tailnet>.ts.net`). `ADMIN_PASSWORD` must be at least
+   16 characters. It guards the public `/mcp-login` page, so use a generated one.
+3. **Run.**
 
    ```sh
    mkdir -p data backups && sudo chown 10001 data backups
@@ -43,54 +58,49 @@ uv run uvicorn garmin_reasoner.main:create_app --factory --reload
    docker compose logs -f
    ```
 
-   The container listens on `127.0.0.1:8000` only.
-3. **Expose via Tailscale.** `sh deploy/tailscale.sh`. This puts the public paths on Funnel
-   (port 443) and `/connect` + `/admin` on tailnet-only Serve (port 8443). Check with
-   `tailscale funnel status`: only the public paths should be listed under Funnel.
-4. **Garmin developer portal.**
-   - Redirect URI: `https://<host>.<tailnet>.ts.net/callback` (same as `REDIRECT_URI`).
-   - Endpoint configuration: for each enabled summary type, set the URL to
-     `https://<host>.<tailnet>.ts.net/garmin/webhook` and pick push or ping (both work).
-5. **Link Garmin.** From a device on the tailnet, open
-   `https://<host>.<tailnet>.ts.net:8443/connect`, log in with any username and the admin
-   password, and approve on Garmin. You should see `{"status": "connected", ...}`.
-6. **Load history.** Request a backfill for each type you want, up to 90 days per call:
+   The first sync starts 10 seconds after startup and pulls the last 90 days. Look for
+   `sync finished` in the logs.
+4. **Expose via Tailscale.** `sh deploy/tailscale.sh`. This puts the MCP paths on Funnel
+   (port 443) and `/admin` on tailnet-only Serve (port 8443). Check with
+   `tailscale funnel status`.
+5. **Load older history** (optional; up to 366 days per call):
 
    ```sh
    curl -u admin:$ADMIN_PASSWORD -H 'Content-Type: application/json' \
-     https://<host>.<tailnet>.ts.net:8443/admin/backfill \
-     -d '{"summary_types": ["dailies", "sleeps", "hrv", "stressDetails", "activities"],
-          "start": "2026-08-01", "end": "2026-10-24"}'
+     https://<host>.<tailnet>.ts.net:8443/admin/sync \
+     -d '{"start": "2025-07-01", "end": "2026-07-27"}'
    ```
 
-   The data arrives over the following minutes or hours via the webhook.
-7. **Add to Claude.** In claude.ai → Settings → Connectors → Add custom connector, use
+6. **Add to Claude.** In claude.ai → Settings → Connectors → Add custom connector, use
    `https://<host>.<tailnet>.ts.net/mcp`. Claude registers itself and opens `/mcp-login`.
    Check that it names Claude and a `claude.ai` callback, then enter the admin password.
 
 ## Operations
 
-- **Daily jobs** (in-process, first run 5 minutes after start):
-  - *Gap-check:* looks at the last `GAP_CHECK_DAYS` days (excluding the newest 2) for
-    days missing `dailies`, `sleeps`, `hrv` or `stressDetails`, and requests a backfill
-    for them. A day is retried weekly, at most 3 times.
-  - *Backup:* writes a consistent copy to `backups/`, keeping the newest `BACKUP_KEEP`.
-    Run one by hand with `docker compose exec garmin-reasoner python -m garmin_reasoner.backup`.
-- **Off-site backups are up to you.** Copy `backups/` somewhere else, such as another machine
-  or encrypted cloud storage. Treat backups as secret: they contain health data and Garmin
-  refresh tokens. MCP tokens are only stored hashed.
-- **If Garmin access lapses** (refresh token expired or revoked), pings and backfills log
-  `NoAccessTokenError`. Run `/connect` again.
+- **Sync** runs every `SYNC_INTERVAL_MINUTES` (default 60). For each feed it re-pulls from
+  `SYNC_LOOKBACK_DAYS` days before the last synced date up to tomorrow. That picks up late
+  watch uploads, and after an outage it catches up on its own (up to 90 days back).
+  Claude's `list_available_data` tool shows the last sync time and error for each feed.
+- **Rotating the API key:** keys last up to a year. The log warns 14 days before
+  `GARMIN_API_KEY_EXPIRES`. Create a new key, update `.env`, and run
+  `docker compose up -d`.
+- **Backups:** every day the app writes a consistent copy to `backups/`, keeping the newest
+  `BACKUP_KEEP`. Run one by hand with
+  `docker compose exec garmin-reasoner python -m garmin_reasoner.backup`. Copy `backups/`
+  somewhere else, such as another machine or encrypted cloud storage. Backups contain
+  health data. MCP tokens are only stored hashed, and the Garmin key is never in the
+  database.
+- **Privacy:** activities' GPS start/end coordinates and account identifiers are kept in
+  the raw data but never returned to Claude (`HIDDEN_FIELDS` in `queries.py`).
 
-## Things to verify against the Garmin portal docs
+## Verified against the live API (2026-10-25)
 
-These came from public material and couldn't be checked against the partner-only docs:
+- The key exchange returns the access token as a bare JWT (`text/plain`), valid 24h by
+  its `exp` claim. It is sent as `Authorization: Bearer <token>`.
+- Every feed works. `weight/all` answers HTTP 400 (with an empty body) for valid ranges,
+  so weight uses `weight/range?includeAll=true` instead.
+- Weight values come in **grams**, despite the spec saying kilograms.
 
-- OAuth authorize URL and token response fields (`config.py`, `oauth.py`).
-- Webhook payload field names: `summaryId`, `callbackURL`, `calendarDate`,
-  `startTimeInSeconds`, `startTimeOffsetInSeconds`.
-- Which field, if any, carries an upload time (`summaries.upload_time` is left NULL).
-- Backfill endpoint names and limits (`BACKFILL_TYPES` in `backfill.py`). Some differ from
-  the webhook's summary keys, e.g. `respiration` vs `allDayRespiration`.
-- Whether Garmin offers any way to authenticate webhook requests (currently: unknown
-  userIds are dropped, and ping callbacks are only fetched from `https://apis.garmin.com`).
+Still undocumented: date-range limits for HRV, weight and activities (the client uses
+conservative chunks), and rate limits (429 and 5xx responses are retried with backoff,
+honouring `Retry-After`).

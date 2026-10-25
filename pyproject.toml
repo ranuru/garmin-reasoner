@@ -1,7 +1,7 @@
 [project]
 name = "garmin-reasoner"
 version = "0.1.0"
-description = "Receives Garmin Connect data, stores it in SQLite, and exposes it to Claude via a remote MCP server."
+description = "Pulls Garmin Connect data into SQLite and exposes it to Claude via a remote MCP server."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
