@@ -182,7 +182,10 @@ uv run uvicorn garmin_reasoner.main:create_app --factory --reload
 - **Privacy:** activities' GPS start/end coordinates and account identifiers are kept in
   the raw data but never returned to Claude (`HIDDEN_FIELDS` in `queries.py`).
 
-## Verified against the live API (2026-10-25)
+## API quirks
+
+Learned against the live API; the spec (`docs/garmin-personal-api.json`) isn't always
+right.
 
 - The key exchange returns the access token as a bare JWT (`text/plain`), valid 24h by
   its `exp` claim. It is sent as `Authorization: Bearer <token>`.
@@ -197,3 +200,7 @@ uv run uvicorn garmin_reasoner.main:create_app --factory --reload
 Still undocumented: date-range limits for HRV, weight and activities (the client uses
 conservative chunks), and rate limits (429 and 5xx responses are retried with backoff,
 honouring `Retry-After`).
+
+## License
+
+[MIT](LICENSE)
