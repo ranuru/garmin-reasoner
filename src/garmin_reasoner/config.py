@@ -4,7 +4,7 @@ from datetime import date
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import SecretStr, field_validator
+from pydantic import AnyHttpUrl, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 MIN_ADMIN_PASSWORD_LENGTH = 16
@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     def _strip_trailing_slash(cls, value: str) -> str:
         if not value.startswith("https://"):
             raise ValueError("must be an https:// URL")
+        try:
+            AnyHttpUrl(value)
+        except ValueError as exc:
+            raise ValueError(
+                "must be a valid URL, e.g. https://host.tailnet.ts.net (or https://localhost"
+                " until Tailscale Funnel is set up)"
+            ) from exc
         return value.rstrip("/")
 
 
