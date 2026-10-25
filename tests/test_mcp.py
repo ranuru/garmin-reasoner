@@ -352,3 +352,17 @@ def test_allowed_hosts(public_base_url: str, expected: list[str]) -> None:
     from garmin_reasoner.mcp_server import allowed_hosts
 
     assert allowed_hosts(public_base_url) == expected
+
+
+def test_login_page_csp_allows_redirect_to_client(client: TestClient) -> None:
+    """Browsers apply form-action to the redirect after Approve; 'self' alone blocks it."""
+    client_id = register(client).json()["client_id"]
+    page = client.get("/mcp-login", params={"request_id": start_authorization(client, client_id)})
+
+    csp = page.headers["content-security-policy"]
+    form_action = next(d for d in csp.split(";") if d.strip().startswith("form-action")).split()
+    assert "'self'" in form_action
+    assert "https://claude.ai" in form_action
+    assert "https://claude.com" in form_action
+    # Nothing broader than the client origins.
+    assert "*" not in csp and "https:" not in form_action

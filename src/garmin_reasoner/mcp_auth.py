@@ -24,7 +24,7 @@ import time
 from collections import deque
 from contextlib import closing
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlencode
+from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -407,14 +407,27 @@ class LoginThrottle:
 
 router = APIRouter()
 
-_SECURITY_HEADERS = {
-    "Content-Security-Policy": (
-        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"
-    ),
-    "X-Frame-Options": "DENY",
-    "Cache-Control": "no-store",
-    "Referrer-Policy": "no-referrer",
-}
+
+def _security_headers(request: Request) -> dict[str, str]:
+    """Headers for the login page and its responses.
+
+    `form-action` also governs where a form submission may be *redirected*, and approving
+    redirects to the client (claude.ai). With only 'self', browsers silently block that
+    redirect and the Approve button appears to do nothing. So allow exactly the origins
+    of the permitted redirect URIs.
+    """
+    allowed = request.app.state.settings.mcp_allowed_redirect_uris
+    redirect_origins = sorted({f"{u.scheme}://{u.netloc}" for u in map(urlsplit, allowed)})
+    form_action = " ".join(["'self'", *redirect_origins])
+    return {
+        "Content-Security-Policy": (
+            f"default-src 'none'; style-src 'unsafe-inline'; form-action {form_action};"
+            " frame-ancestors 'none'"
+        ),
+        "X-Frame-Options": "DENY",
+        "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer",
+    }
 
 
 def _login_page(
@@ -453,8 +466,8 @@ def _login_url(request: Request) -> str:
     return request.app.state.settings.public_base_url + LOGIN_PATH
 
 
-def _html(content: str, status_code: int = 200) -> HTMLResponse:
-    return HTMLResponse(content, status_code=status_code, headers=_SECURITY_HEADERS)
+def _html(request: Request, content: str, status_code: int = 200) -> HTMLResponse:
+    return HTMLResponse(content, status_code=status_code, headers=_security_headers(request))
 
 
 @router.get(LOGIN_PATH)
@@ -462,8 +475,8 @@ def login_form(request: Request, request_id: str = "") -> Response:
     provider: SQLiteOAuthProvider = request.app.state.mcp_provider
     described = provider.describe_request(request_id)
     if described is None:
-        return _html("<p>This authorization request is unknown or has expired.</p>", 400)
-    return _html(_login_page(_login_url(request), request_id, *described))
+        return _html(request, "<p>This authorization request is unknown or has expired.</p>", 400)
+    return _html(request, _login_page(_login_url(request), request_id, *described))
 
 
 @router.post(LOGIN_PATH)
@@ -477,10 +490,11 @@ async def login_submit(request: Request) -> Response:
 
     described = provider.describe_request(request_id)
     if described is None:
-        return _html("<p>This authorization request is unknown or has expired.</p>", 400)
+        return _html(request, "<p>This authorization request is unknown or has expired.</p>", 400)
     if throttle.blocked():
         log.warning("MCP login throttled")
         return _html(
+            request,
             _login_page(
                 _login_url(request), request_id, *described, error="Too many attempts; try later."
             ),
@@ -492,11 +506,13 @@ async def login_submit(request: Request) -> Response:
         throttle.record_failure()
         log.warning("failed MCP login attempt")
         return _html(
-            _login_page(_login_url(request), request_id, *described, error="Wrong password."), 401
+            request,
+            _login_page(_login_url(request), request_id, *described, error="Wrong password."),
+            401,
         )
 
     redirect = provider.approve_request(request_id)
     if redirect is None:
-        return _html("<p>This authorization request is unknown or has expired.</p>", 400)
+        return _html(request, "<p>This authorization request is unknown or has expired.</p>", 400)
     log.info("approved MCP authorization for %r", described[0])
-    return RedirectResponse(redirect, status_code=303, headers=_SECURITY_HEADERS)
+    return RedirectResponse(redirect, status_code=303, headers=_security_headers(request))
