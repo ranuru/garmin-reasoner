@@ -26,6 +26,13 @@ MIGRATIONS: list[str] = [
     CREATE INDEX idx_summaries_type_start ON summaries (type, start_time);
     CREATE INDEX idx_summaries_user ON summaries (user_id);
     """,
+    # 2: Garmin users we accept data for. Webhook entries for any other userId are dropped.
+    """
+    CREATE TABLE users (
+        user_id      TEXT PRIMARY KEY,  -- Garmin API user ID
+        connected_at TEXT NOT NULL      -- ISO 8601 UTC
+    );
+    """,
 ]
 
 

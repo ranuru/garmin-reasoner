@@ -1,11 +1,13 @@
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
+import httpx
 import pytest
+from fakes import ACCESS_TOKEN, USER_ID, FakeGarminAPI
 from fastapi.testclient import TestClient
 
-from garmin_reasoner import db
+from garmin_reasoner import db, storage
 from garmin_reasoner.config import Settings
 from garmin_reasoner.main import create_app
 
@@ -31,6 +33,41 @@ def conn(settings: Settings) -> Iterator[sqlite3.Connection]:
 
 
 @pytest.fixture
-def client(settings: Settings) -> Iterator[TestClient]:
-    with TestClient(create_app(settings)) as client:
-        yield client
+def known_user(conn: sqlite3.Connection) -> str:
+    storage.add_user(conn, USER_ID, "2026-10-01T00:00:00+00:00")
+    return USER_ID
+
+
+@pytest.fixture
+def garmin_api() -> FakeGarminAPI:
+    return FakeGarminAPI()
+
+
+@pytest.fixture
+def make_client(
+    settings: Settings, garmin_api: FakeGarminAPI
+) -> Iterator[Callable[..., TestClient]]:
+    clients: list[TestClient] = []
+
+    async def fake_token_provider(user_id: str) -> str:
+        return ACCESS_TOKEN
+
+    def make(**overrides: object) -> TestClient:
+        options: dict[str, object] = {
+            "http_client": httpx.AsyncClient(transport=httpx.MockTransport(garmin_api.handler)),
+            "token_provider": fake_token_provider,
+        }
+        options.update(overrides)
+        client = TestClient(create_app(settings, **options))
+        client.__enter__()
+        clients.append(client)
+        return client
+
+    yield make
+    for client in clients:
+        client.__exit__(None, None, None)
+
+
+@pytest.fixture
+def client(make_client: Callable[..., TestClient]) -> TestClient:
+    return make_client()
