@@ -1,4 +1,6 @@
+import os
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -46,3 +48,20 @@ def test_failed_migration_rolls_back(monkeypatch: pytest.MonkeyPatch) -> None:
     assert db.schema_version(conn) == 0
     tables = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
     assert tables == []
+
+
+@pytest.mark.skipif(os.getuid() == 0, reason="root can write anywhere")
+def test_unwritable_data_dir_fails_with_fix(tmp_path: Path) -> None:
+    locked = tmp_path / "data"
+    locked.mkdir()
+    locked.chmod(0o500)
+    try:
+        with pytest.raises(RuntimeError, match=r"cannot write to .*data.*sudo chown -R"):
+            db.ensure_writable_dir(locked)
+    finally:
+        locked.chmod(0o700)
+
+
+def test_missing_data_dir_is_created(tmp_path: Path) -> None:
+    db.ensure_writable_dir(tmp_path / "new" / "data")
+    assert (tmp_path / "new" / "data").is_dir()

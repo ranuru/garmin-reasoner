@@ -4,6 +4,7 @@ Migrations are an ordered list of SQL scripts. `PRAGMA user_version` records how
 have been applied, so `init_db` is safe to call on every startup.
 """
 
+import os
 import sqlite3
 from pathlib import Path
 
@@ -108,6 +109,25 @@ MIGRATIONS: list[str] = [
     );
     """,
 ]
+
+
+def ensure_writable_dir(directory: Path) -> None:
+    """Fail fast, with a fix, if the app can't write to `directory`.
+
+    The usual cause is a Docker bind mount created by root on the host, while the
+    container runs as an unprivileged user.
+    """
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        writable = os.access(directory, os.W_OK | os.X_OK)
+    except PermissionError:
+        writable = False
+    if not writable:
+        uid = os.getuid()
+        raise RuntimeError(
+            f"cannot write to {directory} (running as uid {uid}). On the host, give that"
+            f" user the mounted folder, e.g.: sudo chown -R {uid}:{uid} data backups"
+        )
 
 
 def connect(path: Path | str) -> sqlite3.Connection:

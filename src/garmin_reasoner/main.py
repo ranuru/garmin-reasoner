@@ -36,6 +36,9 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        db.ensure_writable_dir(settings.database_path.parent)
+        if settings.jobs_enabled:
+            db.ensure_writable_dir(settings.backup_dir)
         conn = db.connect(settings.database_path)
         db.init_db(conn)
         conn.close()
