@@ -49,8 +49,17 @@ def build_mcp_server(settings: Settings, provider: SQLiteOAuthProvider) -> MCPSe
     return mcp
 
 
+def allowed_hosts(public_base_url: str) -> list[str]:
+    """Host header values /mcp accepts (DNS rebinding protection).
+
+    With a non-default port (e.g. Funnel on 10000), proxies may send Host with or
+    without it; accept both, but nothing else.
+    """
+    url = urlsplit(public_base_url)
+    return sorted({url.netloc, url.hostname or url.netloc})
+
+
 def build_mcp_app(mcp: MCPServer, settings: Settings) -> Starlette:
-    host = urlsplit(settings.public_base_url).netloc
     return mcp.streamable_http_app(
         streamable_http_path="/mcp",
         # Stateless + JSON: no server-side sessions to lose on restart, no SSE to proxy.
@@ -58,7 +67,7 @@ def build_mcp_app(mcp: MCPServer, settings: Settings) -> Starlette:
         json_response=True,
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
-            allowed_hosts=[host],
+            allowed_hosts=allowed_hosts(settings.public_base_url),
             allowed_origins=[settings.public_base_url, "https://claude.ai", "https://claude.com"],
         ),
     )

@@ -339,3 +339,16 @@ def test_mcp_rejects_foreign_host_header(client: TestClient, host: str) -> None:
         headers={**MCP_HEADERS, "Authorization": f"Bearer {tokens['access_token']}", "Host": host},
     )
     assert response.status_code in (400, 421)
+
+
+@pytest.mark.parametrize(
+    "public_base_url, expected",
+    [
+        ("https://example.ts.net", ["example.ts.net"]),
+        ("https://example.ts.net:10000", ["example.ts.net", "example.ts.net:10000"]),
+    ],
+)
+def test_allowed_hosts(public_base_url: str, expected: list[str]) -> None:
+    from garmin_reasoner.mcp_server import allowed_hosts
+
+    assert allowed_hosts(public_base_url) == expected

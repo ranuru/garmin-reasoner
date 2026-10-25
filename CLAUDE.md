@@ -47,6 +47,7 @@ Runs on my home server (already on my Tailscale tailnet), in Docker.
 - Only the MCP and MCP-OAuth routes are public, via **Tailscale Funnel** (claude.ai calls from the internet). Garmin never calls in.
 - Admin routes (`/admin/*`) reachable **only via the tailnet** (`tailscale serve`), never through Funnel.
 - Funnel only allows a few ports (443/8443/10000) and gives a `*.ts.net` HTTPS URL — that's `PUBLIC_BASE_URL`, the MCP OAuth issuer.
+- Home Assistant already uses Funnel on 443 of the same machine, and it serves its own `/.well-known/oauth-authorization-server`. So this app gets its own Funnel port (10000, `PUBLIC_BASE_URL=https://<host>.ts.net:10000`); never share an origin with HA, or claude.ai's OAuth discovery lands on HA's login.
 - Back up the SQLite file (it's the only copy of the history).
 
 ## Build status
