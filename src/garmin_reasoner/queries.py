@@ -34,12 +34,20 @@ def summaries_in_range(
     conn: sqlite3.Connection, summary_type: str, start: date, end: date
 ) -> list[dict[str, Any]]:
     """Records of one type whose local calendar date is in [start, end], oldest first."""
+    return [summary for _, summary in dated_summaries_in_range(conn, summary_type, start, end)]
+
+
+def dated_summaries_in_range(
+    conn: sqlite3.Connection, summary_type: str, start: date, end: date
+) -> list[tuple[str, dict[str, Any]]]:
+    """Like `summaries_in_range`, paired with each record's calendar date (YYYY-MM-DD)."""
     rows = conn.execute(
-        "SELECT raw_json FROM summaries WHERE type = ? AND calendar_date BETWEEN ? AND ?"
+        "SELECT calendar_date, raw_json FROM summaries"
+        " WHERE type = ? AND calendar_date BETWEEN ? AND ?"
         " ORDER BY calendar_date, start_time, summary_id",
         (summary_type, start.isoformat(), end.isoformat()),
     )
-    return [_without_hidden(json.loads(row["raw_json"])) for row in rows]
+    return [(row["calendar_date"], _without_hidden(json.loads(row["raw_json"]))) for row in rows]
 
 
 def data_overview(conn: sqlite3.Connection) -> list[dict[str, Any]]:

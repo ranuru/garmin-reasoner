@@ -3,6 +3,7 @@ register -> authorize -> log in -> token -> call tools."""
 
 import base64
 import hashlib
+import json
 import secrets
 import sqlite3
 from collections.abc import Callable
@@ -177,6 +178,10 @@ def test_full_connector_flow_and_tool_call(client: TestClient, conn: sqlite3.Con
     listed = rpc(client, token, "tools/list").json()["result"]["tools"]
     assert {t["name"] for t in listed} == {
         "list_available_data",
+        "get_period_stats",
+        "get_sleep_summary",
+        "get_daily_overview",
+        "get_activity_list",
         "get_daily_summaries",
         "get_sleep",
         "get_hrv",
@@ -207,6 +212,60 @@ def test_tool_rejects_oversized_range(client: TestClient) -> None:
         client, tokens["access_token"], "get_sleep", {"start": "2026-01-01", "end": "2026-12-31"}
     )
     assert result["isError"]
+
+
+def test_summary_tool_returns_compact_rows(client: TestClient, conn: sqlite3.Connection) -> None:
+    storage.upsert_summary(
+        conn,
+        "dailies",
+        "2026-10-20",
+        {"calendarDate": "2026-10-20", "userProfilePk": 1, "movement": {"steps": {"value": 9000}}},
+        "t",
+        "2026-10-20",
+    )
+    _, tokens = connect_claude(client)
+
+    result = call_tool(
+        client,
+        tokens["access_token"],
+        "get_daily_overview",
+        {"start": "2026-10-20", "end": "2026-10-21"},
+    )
+
+    assert not result.get("isError")
+    assert "structuredContent" not in result or result["structuredContent"] is None
+    [content] = result["content"]
+    assert "\n  " not in content["text"]  # not pretty-printed
+    body = json.loads(content["text"])
+    assert body["missing"] == ["2026-10-21"]
+    [row] = body["rows"]
+    assert row["steps"] == 9000
+    assert row["resting_hr"] is None
+
+
+@pytest.mark.parametrize(
+    "tool, arguments, ok",
+    [
+        ("get_sleep_summary", {"start": "2026-07-25", "end": "2026-10-25"}, True),  # 93 days
+        ("get_sleep_summary", {"start": "2026-07-24", "end": "2026-10-25"}, False),
+        ("get_period_stats", {"start": "2025-10-25", "end": "2026-10-25"}, True),  # 366 days
+        ("get_period_stats", {"start": "2025-10-24", "end": "2026-10-25"}, False),
+        (
+            "get_period_stats",
+            {"start": "2026-10-01", "end": "2026-10-25", "group_by": "day"},
+            False,
+        ),
+        ("get_activity_list", {"start": "2026-10-25", "end": "2026-10-24"}, False),
+    ],
+)
+def test_summary_tool_ranges(
+    client: TestClient, tool: str, arguments: dict[str, Any], ok: bool
+) -> None:
+    _, tokens = connect_claude(client)
+
+    result = call_tool(client, tokens["access_token"], tool, arguments)
+
+    assert bool(result.get("isError")) is not ok
 
 
 # --- policy ---

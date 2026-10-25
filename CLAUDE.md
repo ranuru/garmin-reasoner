@@ -13,7 +13,7 @@ Watch → Garmin Connect ← (hourly pull, API key) ← sync job → SQLite
 One Python service (FastAPI):
 
 1. **Sync job** (in-process, every `SYNC_INTERVAL_MINUTES`) → pulls each feed from the Garmin Personal API and upserts raw JSON. Re-pulls from a few days before the last synced date, which covers late uploads and heals downtime.
-2. `/mcp` → remote MCP server (streamable HTTP) with read-only tools: `list_available_data`, `get_daily_summaries`, `get_sleep`, `get_hrv`, `get_activities`, `get_stress`, `get_body_battery`, `get_weight` (all `(start, end)`).
+2. `/mcp` → remote MCP server (streamable HTTP) with read-only tools: `list_available_data`; compact summaries (`compact.py`, flat rows, use first) `get_period_stats`, `get_sleep_summary`, `get_daily_overview`, `get_activity_list`; raw Garmin JSON for drill-down `get_daily_summaries`, `get_sleep`, `get_hrv`, `get_activities`, `get_stress`, `get_body_battery`, `get_weight` (all `(start, end)`).
 3. MCP OAuth endpoints (`/authorize`, `/token`, `/register`, `/revoke`, `/.well-known/*`, `/mcp-login`) → our own authorization server for the claude.ai connector.
 4. `POST /admin/sync` (auth-protected) → pull a historical range.
 

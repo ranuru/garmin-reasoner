@@ -1,5 +1,7 @@
 """Remote MCP server (streamable HTTP at `/mcp`) with read-only tools over stored data."""
 
+import sqlite3
+from collections.abc import Callable
 from contextlib import closing
 from datetime import date, timedelta
 from typing import Any
@@ -8,22 +10,33 @@ from urllib.parse import urlsplit
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp_types import ToolAnnotations
+from mcp_types import TextContent, ToolAnnotations
 from starlette.applications import Starlette
 
-from garmin_reasoner import db, queries, storage
+from garmin_reasoner import compact, db, queries, storage
+from garmin_reasoner.compact import GroupBy
 from garmin_reasoner.config import Settings
 from garmin_reasoner.mcp_auth import SCOPE, SQLiteOAuthProvider
 
 MAX_RANGE_DAYS = 93
+MAX_STATS_RANGE_DAYS = 366
 READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
 
 INSTRUCTIONS = """\
 Garmin Connect health and activity data for one person, as stored by their own service.
 Dates are the person's local calendar dates (YYYY-MM-DD), and ranges are inclusive.
-Records are Garmin's raw JSON. Units differ by type and are usually in the field name
-(...Seconds, ...InMillis, ...Meters). Call list_available_data first to see what exists
-and how fresh it is.
+Call list_available_data first to see what exists and how fresh it is.
+
+Start with the compact summary tools: get_period_stats for trends and comparisons
+across weeks or months, then get_sleep_summary, get_daily_overview and
+get_activity_list for one row per night, day or activity. They return flat rows with
+units in the key names and null for values that weren't recorded.
+
+The get_sleep, get_daily_summaries, get_activities, get_hrv, get_stress,
+get_body_battery and get_weight tools return Garmin's raw JSON, which is large. Use
+them only to drill into a few days or one activity for a detail the summaries lack.
+Units in raw records differ by type and are usually in the field name (...Seconds,
+...InMillis, ...Meters).
 """
 
 
@@ -83,14 +96,29 @@ def build_mcp_app(mcp: MCPServer, settings: Settings) -> Starlette:
     )
 
 
+def _check_range(start: date, end: date, max_days: int) -> None:
+    if end < start:
+        raise ValueError("end must not be before start")
+    if end - start > timedelta(days=max_days - 1):
+        raise ValueError(f"range is limited to {max_days} days; split the request")
+
+
 def _register_tools(mcp: MCPServer, settings: Settings) -> None:
     database_path = settings.database_path
 
+    def compact_view(
+        view: Callable[[sqlite3.Connection, date, date], dict[str, Any]],
+        start: date,
+        end: date,
+        max_days: int = MAX_RANGE_DAYS,
+    ) -> TextContent:
+        _check_range(start, end, max_days)
+        with closing(db.connect(database_path)) as conn:
+            result = view(conn, start, end)
+        return TextContent(type="text", text=compact.to_text(result))
+
     def fetch(summary_type: str, start: date, end: date) -> dict[str, Any]:
-        if end < start:
-            raise ValueError("end must not be before start")
-        if end - start > timedelta(days=MAX_RANGE_DAYS - 1):
-            raise ValueError(f"range is limited to {MAX_RANGE_DAYS} days; split the request")
+        _check_range(start, end, MAX_RANGE_DAYS)
         with closing(db.connect(database_path)) as conn:
             summaries = queries.summaries_in_range(conn, summary_type, start, end)
         return {
@@ -114,6 +142,57 @@ def _register_tools(mcp: MCPServer, settings: Settings) -> None:
             "sync": sync,
             "garmin_api_key_expires": expires.isoformat() if expires else None,
         }
+
+    # --- compact summaries: use these first ---
+
+    @mcp.tool(annotations=READ_ONLY)
+    def get_period_stats(start: date, end: date, group_by: GroupBy = "week") -> TextContent:
+        """Start here for trends, such as "how has my sleep been the last 3 months?".
+        Pre-computed stats per ISO week, calendar month, or the whole range
+        (group_by "none"), up to 366 days. Each row: period, start, end, days, nights
+        with sleep data; avg and median of sleep_min, sleep_score, bedtime (local
+        HH:MM), resting_hr, hrv (overnight ms), steps and stress (0-100);
+        nights_under_7h and nights_under_6h; activities as {type: count}; im_moderate
+        and im_vigorous totals, and im_total = moderate + 2 x vigorous (Garmin's
+        intensity-minute goal); weight_first_kg and weight_last_kg. Partial periods at
+        either end are clipped (see days). Today is usually incomplete."""
+        return compact_view(
+            lambda conn, s, e: compact.period_stats(conn, s, e, group_by),
+            start,
+            end,
+            MAX_STATS_RANGE_DAYS,
+        )
+
+    @mcp.tool(annotations=READ_ONLY)
+    def get_sleep_summary(start: date, end: date) -> TextContent:
+        """One compact row per night, dated by the morning it ends (up to 93 days).
+        Fields: date, bedtime and wake (local HH:MM), sleep_min, deep_min, light_min,
+        rem_min, awake_min, score (0-100), avg_stress (during sleep), avg_hr (bpm),
+        avg_resp (breaths/min), hrv (overnight average, ms), nap_min. Dates with
+        neither sleep nor HRV data are listed in "missing". Use get_sleep only for
+        details not here (SpO2, sleep need, sub-scores)."""
+        return compact_view(compact.sleep_summary, start, end)
+
+    @mcp.tool(annotations=READ_ONLY)
+    def get_daily_overview(start: date, end: date) -> TextContent:
+        """One compact row per day (up to 93 days): date, steps, floors (climbed),
+        resting_hr, im_moderate and im_vigorous (intensity minutes), active_kcal,
+        bb_max and bb_min (Body Battery), stress (average 0-100), and activities as
+        "type minutes" strings. Days without data are listed in "missing". Today is
+        usually incomplete. Use get_daily_summaries only for details not here."""
+        return compact_view(compact.daily_overview, start, end)
+
+    @mcp.tool(annotations=READ_ONLY)
+    def get_activity_list(start: date, end: date) -> TextContent:
+        """One compact row per recorded activity (up to 93 days): start (local
+        "YYYY-MM-DD HH:MM"), type, name, duration_min, distance_km, pace_min_km
+        ("m:ss" per km, runs only) or speed_kmh (other activities with a distance),
+        avg_hr, max_hr, elev_gain_m, training_effect (Garmin's label), z1_min..z5_min
+        (minutes in each heart rate zone). Use get_activities only for details not
+        here (power, cadence, running dynamics, splits)."""
+        return compact_view(compact.activity_list, start, end)
+
+    # --- raw Garmin JSON: for drill-down ---
 
     @mcp.tool(annotations=READ_ONLY)
     def get_daily_summaries(start: date, end: date) -> dict[str, Any]:
