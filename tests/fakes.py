@@ -7,6 +7,7 @@ import httpx
 USER_ID = "user-123"
 ACCESS_TOKEN = "test-access-token"
 ADMIN_PASSWORD = "test-admin-password"
+PUBLIC_BASE_URL = "https://example.ts.net"
 TOKEN_URL = "https://diauth.garmin.com/di-oauth2-service/oauth/token"
 USER_ID_URL = "https://apis.garmin.com/wellness-api/rest/user/id"
 REGISTRATION_URL = "https://apis.garmin.com/wellness-api/rest/user/registration"

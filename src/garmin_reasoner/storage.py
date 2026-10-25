@@ -118,6 +118,34 @@ def save_oauth_state(
         )
 
 
+def backfill_attempt(
+    conn: sqlite3.Connection, user_id: str, summary_type: str, calendar_date: str
+) -> tuple[int, int] | None:
+    """(attempts, last_requested_at) for a gap-check backfill, if one was requested."""
+    row = conn.execute(
+        "SELECT attempts, last_requested_at FROM backfill_requests"
+        " WHERE user_id = ? AND type = ? AND calendar_date = ?",
+        (user_id, summary_type, calendar_date),
+    ).fetchone()
+    return (row["attempts"], row["last_requested_at"]) if row else None
+
+
+def record_backfill_attempt(
+    conn: sqlite3.Connection, user_id: str, summary_type: str, calendar_date: str, at: int
+) -> None:
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO backfill_requests
+                (user_id, type, calendar_date, attempts, last_requested_at)
+            VALUES (?, ?, ?, 1, ?)
+            ON CONFLICT (user_id, type, calendar_date) DO UPDATE SET
+                attempts = attempts + 1, last_requested_at = excluded.last_requested_at
+            """,
+            (user_id, summary_type, calendar_date, at),
+        )
+
+
 def pop_oauth_state(conn: sqlite3.Connection, state: str, not_before: int) -> str | None:
     """Consume a state, returning its code verifier, or None if unknown or too old.
 

@@ -50,6 +50,47 @@ MIGRATIONS: list[str] = [
         created_at    INTEGER NOT NULL  -- epoch seconds
     );
     """,
+    # 4: our own OAuth server for the MCP endpoint (claude.ai is the client). Codes and
+    # tokens are stored as SHA-256 hashes, so a leaked database can't be replayed against /mcp.
+    """
+    CREATE TABLE mcp_clients (
+        client_id  TEXT PRIMARY KEY,
+        info_json  TEXT    NOT NULL,  -- OAuthClientInformationFull
+        created_at INTEGER NOT NULL
+    );
+    CREATE TABLE mcp_auth_requests (  -- /authorize requests awaiting the login page
+        request_id  TEXT PRIMARY KEY,
+        client_id   TEXT    NOT NULL REFERENCES mcp_clients (client_id) ON DELETE CASCADE,
+        params_json TEXT    NOT NULL,  -- AuthorizationParams
+        created_at  INTEGER NOT NULL
+    );
+    CREATE TABLE mcp_auth_codes (
+        code_hash  TEXT PRIMARY KEY,
+        client_id  TEXT    NOT NULL REFERENCES mcp_clients (client_id) ON DELETE CASCADE,
+        data_json  TEXT    NOT NULL,  -- AuthorizationCode minus the code itself
+        expires_at INTEGER NOT NULL
+    );
+    CREATE TABLE mcp_tokens (
+        token_hash TEXT PRIMARY KEY,
+        kind       TEXT    NOT NULL CHECK (kind IN ('access', 'refresh')),
+        grant_id   TEXT    NOT NULL,  -- links an access token to its refresh token
+        client_id  TEXT    NOT NULL REFERENCES mcp_clients (client_id) ON DELETE CASCADE,
+        scopes     TEXT    NOT NULL,  -- space-separated
+        expires_at INTEGER NOT NULL
+    );
+    CREATE INDEX idx_mcp_tokens_grant ON mcp_tokens (grant_id);
+    """,
+    # 5: gap-check bookkeeping, so days Garmin has no data for aren't re-requested forever.
+    """
+    CREATE TABLE backfill_requests (
+        user_id           TEXT    NOT NULL,
+        type              TEXT    NOT NULL,
+        calendar_date     TEXT    NOT NULL,
+        attempts          INTEGER NOT NULL,
+        last_requested_at INTEGER NOT NULL,  -- epoch seconds
+        PRIMARY KEY (user_id, type, calendar_date)
+    );
+    """,
 ]
 
 

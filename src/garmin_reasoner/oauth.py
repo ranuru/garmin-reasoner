@@ -114,6 +114,24 @@ class GarminClient:
         )
         response.raise_for_status()
 
+    async def request_backfill(
+        self, access_token: str, summary_type: str, start: int, end: int
+    ) -> int:
+        """Ask Garmin to re-send `summary_type` summaries in [start, end) (epoch seconds).
+
+        Returns 202 if accepted, or 409 if Garmin already has this exact request queued.
+        The data itself arrives later on the webhook.
+        """
+        response = await self._http.get(
+            f"{WELLNESS_API}/backfill/{summary_type}",
+            params={"summaryStartTimeInSeconds": start, "summaryEndTimeInSeconds": end},
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        if response.status_code == 409:
+            return 409
+        response.raise_for_status()
+        return response.status_code
+
     async def _token_request(
         self, data: dict[str, str], previous_refresh_token: str | None = None
     ) -> TokenSet:

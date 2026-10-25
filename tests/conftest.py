@@ -4,7 +4,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from fakes import ACCESS_TOKEN, ADMIN_PASSWORD, USER_ID, FakeGarminAPI
+from fakes import ACCESS_TOKEN, ADMIN_PASSWORD, PUBLIC_BASE_URL, USER_ID, FakeGarminAPI
 from fastapi.testclient import TestClient
 
 from garmin_reasoner import db, storage
@@ -21,6 +21,9 @@ def settings(tmp_path: Path) -> Settings:
         garmin_client_secret="test-client-secret",
         redirect_uri="https://example.ts.net/callback",
         admin_password=ADMIN_PASSWORD,
+        public_base_url=PUBLIC_BASE_URL,
+        jobs_enabled=False,
+        backup_dir=tmp_path / "backups",
         database_path=tmp_path / "test.db",
     )
 
@@ -57,9 +60,11 @@ def make_client(
         options: dict[str, object] = {
             "http_client": httpx.AsyncClient(transport=httpx.MockTransport(garmin_api.handler)),
             "token_provider": fake_token_provider,
+            "backfill_delay": 0,
         }
         options.update(overrides)
-        client = TestClient(create_app(settings, **options))
+        # The MCP transport only accepts requests addressed to the public host.
+        client = TestClient(create_app(settings, **options), base_url=PUBLIC_BASE_URL)
         client.__enter__()
         clients.append(client)
         return client

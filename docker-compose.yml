@@ -1,0 +1,23 @@
+services:
+  garmin-reasoner:
+    build: .
+    image: garmin-reasoner:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_PATH: /app/data/garmin.db
+      BACKUP_DIR: /app/backups
+    ports:
+      # Loopback only: the host's Tailscale (Funnel/Serve) is the only way in.
+      - "127.0.0.1:8000:8000"
+    volumes:
+      # Must be writable by uid 10001: `mkdir -p data backups && sudo chown 10001 data backups`
+      - ./data:/app/data
+      - ./backups:/app/backups
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
