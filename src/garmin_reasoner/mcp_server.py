@@ -19,7 +19,9 @@ from garmin_reasoner.config import Settings
 from garmin_reasoner.mcp_auth import SCOPE, SQLiteOAuthProvider
 
 MAX_RANGE_DAYS = 93
-MAX_STATS_RANGE_DAYS = 366
+# Monthly and whole-range stats have no limit: they're clipped to the stored history,
+# and a month row is ~200 tokens.
+MAX_WEEKLY_STATS_RANGE_DAYS = 366
 READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
 
 INSTRUCTIONS = """\
@@ -96,10 +98,10 @@ def build_mcp_app(mcp: MCPServer, settings: Settings) -> Starlette:
     )
 
 
-def _check_range(start: date, end: date, max_days: int) -> None:
+def _check_range(start: date, end: date, max_days: int | None) -> None:
     if end < start:
         raise ValueError("end must not be before start")
-    if end - start > timedelta(days=max_days - 1):
+    if max_days is not None and end - start > timedelta(days=max_days - 1):
         raise ValueError(f"range is limited to {max_days} days; split the request")
 
 
@@ -110,7 +112,7 @@ def _register_tools(mcp: MCPServer, settings: Settings) -> None:
         view: Callable[[sqlite3.Connection, date, date], dict[str, Any]],
         start: date,
         end: date,
-        max_days: int = MAX_RANGE_DAYS,
+        max_days: int | None = MAX_RANGE_DAYS,
     ) -> TextContent:
         _check_range(start, end, max_days)
         with closing(db.connect(database_path)) as conn:
@@ -148,19 +150,20 @@ def _register_tools(mcp: MCPServer, settings: Settings) -> None:
     @mcp.tool(annotations=READ_ONLY)
     def get_period_stats(start: date, end: date, group_by: GroupBy = "week") -> TextContent:
         """Start here for trends, such as "how has my sleep been the last 3 months?".
-        Pre-computed stats per ISO week, calendar month, or the whole range
-        (group_by "none"), up to 366 days. Each row: period, start, end, days, nights
-        with sleep data; avg and median of sleep_min, sleep_score, bedtime (local
-        HH:MM), resting_hr, hrv (overnight ms), steps and stress (0-100);
-        nights_under_7h and nights_under_6h; activities as {type: count}; im_moderate
-        and im_vigorous totals, and im_total = moderate + 2 x vigorous (Garmin's
-        intensity-minute goal); weight_first_kg and weight_last_kg. Partial periods at
-        either end are clipped (see days). Today is usually incomplete."""
+        Pre-computed stats per ISO week (up to 366 days), or per calendar month or for
+        the whole range (group_by "none") over any range, including all history: pass
+        a start date early enough, e.g. 2000-01-01. The range is clipped to the
+        dates that have data, and the returned start and end show what was covered.
+        Each row: period, start, end, days, nights with sleep data; avg and median of
+        sleep_min, sleep_score, bedtime (local HH:MM), resting_hr, hrv (overnight ms),
+        steps and stress (0-100); nights_under_7h and nights_under_6h; activities as
+        {type: count}; im_moderate and im_vigorous totals, and im_total = moderate +
+        2 x vigorous (Garmin's intensity-minute goal); weight_first_kg and
+        weight_last_kg. Partial periods at either end are clipped (see days). Today is
+        usually incomplete."""
+        max_days = MAX_WEEKLY_STATS_RANGE_DAYS if group_by == "week" else None
         return compact_view(
-            lambda conn, s, e: compact.period_stats(conn, s, e, group_by),
-            start,
-            end,
-            MAX_STATS_RANGE_DAYS,
+            lambda conn, s, e: compact.period_stats(conn, s, e, group_by), start, end, max_days
         )
 
     @mcp.tool(annotations=READ_ONLY)

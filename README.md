@@ -47,7 +47,7 @@ All tools are read-only and take an inclusive `(start, end)` range of local date
 
 | Tool | Max range | One row per |
 | --- | --- | --- |
-| `get_period_stats(start, end, group_by="week")` | 366 days | ISO week, calendar month, or the whole range (`"none"`) |
+| `get_period_stats(start, end, group_by="week")` | 366 days by week; none by `"month"` or `"none"` | ISO week, calendar month, or the whole range (`"none"`) |
 | `get_sleep_summary(start, end)` | 93 days | night, dated by the morning it ends |
 | `get_daily_overview(start, end)` | 93 days | day |
 | `get_activity_list(start, end)` | 93 days | activity |
@@ -59,8 +59,10 @@ noon, so 23:30 and 00:30 average to midnight. Today's row is usually incomplete.
 
 The example outputs below use made-up values.
 
-**`get_period_stats`**: averages and medians, counts, and totals per period. Periods at
-the ends of the range are clipped (see `days`). `im_total` counts vigorous minutes
+**`get_period_stats`**: averages and medians, counts, and totals per period. The range
+is clipped to the first and last date that has data, so monthly or `"none"` stats from
+e.g. `2000-01-01` cover all stored history (a month row is about 200 tokens). Periods at
+the ends of the range are clipped too (see `days`). `im_total` counts vigorous minutes
 twice, as Garmin's weekly intensity goal does.
 
 ```json

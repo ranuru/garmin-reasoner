@@ -42,6 +42,15 @@ def test_hides_identifiers_and_gps(conn: sqlite3.Connection) -> None:
     assert activity == {"activityId": 1, "activityName": "Morning Run", "locationName": "Oslo"}
 
 
+def test_date_span(conn: sqlite3.Connection) -> None:
+    add(conn, "dailies", "a", "2026-10-03")
+    add(conn, "sleeps", "b", "2026-09-30")
+    add(conn, "stress", "c", "2026-08-01")
+
+    assert queries.date_span(conn, ["dailies", "sleeps"]) == (date(2026, 9, 30), date(2026, 10, 3))
+    assert queries.date_span(conn, ["hrv"]) is None
+
+
 def test_overview(conn: sqlite3.Connection) -> None:
     add(conn, "dailies", "a", "2026-10-01")
     add(conn, "dailies", "b", "2026-10-03")

@@ -325,9 +325,22 @@ def period_row(
     }
 
 
+PERIOD_STATS_TYPES = ["sleeps", "hrv", "dailies", "activities", "weight"]
+
+
 def period_stats(
     conn: sqlite3.Connection, start: date, end: date, group_by: GroupBy
 ) -> dict[str, Any]:
+    """Stats per period, for the part of [start, end] that has data.
+
+    The range is clipped to the first and last stored date, so asking for "all time"
+    returns rows for the history that exists rather than empty periods before it.
+    """
+    span = queries.date_span(conn, PERIOD_STATS_TYPES)
+    if span is None or span[0] > end or span[1] < start:
+        return {"group_by": group_by, **_result(start, end, [], covered=None)}
+    start, end = max(start, span[0]), min(end, span[1])
+
     nights = {row["date"]: row for row in sleep_summary(conn, start, end)["rows"]}
     days = {row["date"]: row for row in daily_overview(conn, start, end)["rows"]}
     activities = _all_by_date(conn, "activities", start, end)

@@ -252,6 +252,16 @@ def test_summary_tool_returns_compact_rows(client: TestClient, conn: sqlite3.Con
         ("get_period_stats", {"start": "2025-10-24", "end": "2026-10-25"}, False),
         (
             "get_period_stats",
+            {"start": "2000-01-01", "end": "2026-10-25", "group_by": "month"},
+            True,
+        ),
+        (
+            "get_period_stats",
+            {"start": "2000-01-01", "end": "2026-10-25", "group_by": "none"},
+            True,
+        ),
+        (
+            "get_period_stats",
             {"start": "2026-10-01", "end": "2026-10-25", "group_by": "day"},
             False,
         ),

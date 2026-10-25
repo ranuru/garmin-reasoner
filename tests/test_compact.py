@@ -393,7 +393,7 @@ def test_no_grouping_is_one_period() -> None:
 
 
 def test_period_stats(conn: sqlite3.Connection) -> None:
-    # Week 2026-W43 (Mon 10-19 .. Sun 10-25), queried from Wednesday.
+    # Week 2026-W43 (Mon 10-19 .. Sun 10-25), with data from Wednesday to Friday.
     store(conn, "sleeps", night("2026-10-21", "23:40", sleepTimeSeconds=7.5 * 3600))
     store(conn, "sleeps", night("2026-10-22", "00:20", sleepTimeSeconds=6.5 * 3600))
     store(conn, "sleeps", night("2026-10-23", "01:00", sleepTimeSeconds=5.5 * 3600))
@@ -421,8 +421,8 @@ def test_period_stats(conn: sqlite3.Connection) -> None:
     assert week == {
         "period": "2026-W43",
         "start": "2026-10-21",
-        "end": "2026-10-25",
-        "days": 5,
+        "end": "2026-10-23",
+        "days": 3,
         "nights": 3,
         "sleep_min_avg": 390,
         "sleep_min_median": 390,
@@ -450,13 +450,64 @@ def test_period_stats(conn: sqlite3.Connection) -> None:
 
 
 def test_period_without_data_has_nulls_and_zero_counts(conn: sqlite3.Connection) -> None:
-    result = compact.period_stats(conn, D("2026-10-01"), D("2026-10-31"), "month")
+    store(conn, "sleeps", night("2026-09-30", "23:00"))
+    store(conn, "dailies", daily_record("2026-11-01"))
 
-    [month] = result["rows"]
+    result = compact.period_stats(conn, D("2026-09-01"), D("2026-11-30"), "month")
+
+    september, october, november = result["rows"]
     assert result["group_by"] == "month"
-    assert (month["nights"], month["nights_under_7h"], month["activities"]) == (0, 0, {})
+    assert (october["nights"], october["nights_under_7h"], october["activities"]) == (0, 0, {})
     for key in ("sleep_min_avg", "bedtime_median", "hrv_avg", "im_total", "weight_last_kg"):
-        assert month[key] is None
+        assert october[key] is None
+
+
+def test_period_stats_are_clipped_to_the_stored_history(conn: sqlite3.Connection) -> None:
+    store(conn, "dailies", daily_record("2024-03-15"))
+    store(conn, "sleeps", night("2026-10-24", "23:00"))
+    store(conn, "stress", {"calendarDate": "2027-01-01"})  # not a period-stats feed
+
+    result = compact.period_stats(conn, D("2000-01-01"), D("2030-12-31"), "month")
+
+    assert (result["start"], result["end"], result["count"]) == ("2024-03-15", "2026-10-24", 32)
+    first, last = result["rows"][0], result["rows"][-1]
+    assert (first["period"], first["start"], first["days"]) == ("2024-03", "2024-03-15", 17)
+    assert (last["period"], last["end"], last["days"]) == ("2026-10", "2026-10-24", 24)
+
+
+def test_period_stats_without_any_data(conn: sqlite3.Connection) -> None:
+    result = compact.period_stats(conn, D("2000-01-01"), D("2030-12-31"), "none")
+
+    assert (result["start"], result["end"], result["rows"]) == ("2000-01-01", "2030-12-31", [])
+
+    store(conn, "dailies", daily_record("2026-10-01"))
+    assert compact.period_stats(conn, D("2025-01-01"), D("2025-12-31"), "none")["rows"] == []
+
+
+def test_ten_years_by_month_stays_under_25k_tokens(conn: sqlite3.Connection) -> None:
+    # Two full days a month is enough: every row has the same keys whatever the data.
+    kinds = [RUN, HIKE, STRENGTH, activity(activityType={"typeKey": "trail_running"})]
+    for year in range(2017, 2027):
+        for month in range(1, 13):
+            for n, day in enumerate((f"{year}-{month:02d}-05", f"{year}-{month:02d}-20")):
+                store(conn, "sleeps", night(day, "23:41", napTimeSeconds=1800))
+                store(conn, "hrv", hrv_record(day))
+                store(conn, "dailies", daily_record(day))
+                for k, kind in enumerate(kinds):
+                    activity_id = year * 10_000 + month * 100 + n * 10 + k
+                    start = f"{day} 1{k}:00:00"
+                    store(
+                        conn,
+                        "activities",
+                        {**kind, "activityId": activity_id, "startTimeLocal": start},
+                    )
+                store(conn, "weight", weigh_in(year * 100 + month * 2 + n, day, 80_000.0))
+
+    result = compact.period_stats(conn, D("2000-01-01"), D("2026-12-31"), "month")
+    text = compact.to_text(result)
+
+    assert result["count"] == 120
+    assert len(text) < 25_000 * 3
 
 
 # --- output ---

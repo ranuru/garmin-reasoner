@@ -50,6 +50,17 @@ def dated_summaries_in_range(
     return [(row["calendar_date"], _without_hidden(json.loads(row["raw_json"]))) for row in rows]
 
 
+def date_span(conn: sqlite3.Connection, summary_types: list[str]) -> tuple[date, date] | None:
+    """First and last calendar date stored for any of these types, or None if there's none."""
+    placeholders = ",".join("?" * len(summary_types))
+    first, last = conn.execute(
+        "SELECT MIN(calendar_date), MAX(calendar_date) FROM summaries"
+        f" WHERE type IN ({placeholders})",
+        summary_types,
+    ).fetchone()
+    return (date.fromisoformat(first), date.fromisoformat(last)) if first else None
+
+
 def data_overview(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = conn.execute(
         "SELECT type, COUNT(*) AS count, MIN(calendar_date) AS first_date,"
