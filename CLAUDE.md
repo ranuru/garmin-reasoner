@@ -47,7 +47,7 @@ Runs on my home server (already on my Tailscale tailnet), in Docker.
 - Only the MCP and MCP-OAuth routes are public, via **Tailscale Funnel** (claude.ai calls from the internet). Garmin never calls in.
 - Admin routes (`/admin/*`) reachable **only via the tailnet** (`tailscale serve`), never through Funnel.
 - Funnel only allows a few ports (443/8443/10000) and gives a `*.ts.net` HTTPS URL — that's `PUBLIC_BASE_URL`, the MCP OAuth issuer.
-- Home Assistant already uses Funnel on 443 of the same machine, and it serves its own `/.well-known/oauth-authorization-server`. So this app gets its own Funnel port (10000, `PUBLIC_BASE_URL=https://<host>.ts.net:10000`); never share an origin with HA, or claude.ai's OAuth discovery lands on HA's login.
+- Home Assistant owns `/` on Funnel port 443 of the same host and serves its own `/.well-known/oauth-authorization-server`. claude.ai only connects on 443, so this app lives under a path prefix: `PUBLIC_BASE_URL=https://<host>.ts.net/garmin`, Funnel routes `/garmin` plus `/.well-known/oauth-authorization-server/garmin` and `/.well-known/oauth-protected-resource/garmin` (RFC 8414/9728 path-insertion discovery). Never route an unprefixed OAuth path to this app, or to HA from this app's flow. `PathPrefix` in `mcp_auth.py` strips the prefix; any URL the app hands out must be absolute (built from `PUBLIC_BASE_URL`).
 - Back up the SQLite file (it's the only copy of the history).
 
 ## Build status

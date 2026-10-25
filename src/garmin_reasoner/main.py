@@ -64,6 +64,8 @@ def create_app(
     app.state.settings = settings
     app.state.mcp_provider = provider
     app.state.login_throttle = mcp_auth.LoginThrottle(clock=clock)
+    # Outermost: strips PUBLIC_BASE_URL's path (e.g. /garmin) before anything routes.
+    app.add_middleware(mcp_auth.PathPrefix, prefix=settings.public_path_prefix)
     app.include_router(sync.router)
     app.include_router(mcp_auth.router)
 

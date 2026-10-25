@@ -3,6 +3,7 @@
 from datetime import date
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from pydantic import AnyHttpUrl, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -21,8 +22,9 @@ class Settings(BaseSettings):
 
     # Guards admin routes and the MCP login page, which is reachable from the internet.
     admin_password: SecretStr
-    # Public HTTPS origin (the Tailscale Funnel URL), e.g. https://host.tailnet.ts.net.
-    # Used as the OAuth issuer and MCP resource URL, so it must match what clients see.
+    # Public HTTPS URL (Tailscale Funnel), e.g. https://host.tailnet.ts.net/garmin. A path
+    # lets the app share the hostname with other services. Used as the OAuth issuer and
+    # MCP resource URL (<this>/mcp), so it must match what clients see.
     public_base_url: str
     database_path: Path = Path("data/garmin.db")
 
@@ -54,13 +56,20 @@ class Settings(BaseSettings):
         if not value.startswith("https://"):
             raise ValueError("must be an https:// URL")
         try:
-            AnyHttpUrl(value)
+            url = AnyHttpUrl(value)
         except ValueError as exc:
             raise ValueError(
-                "must be a valid URL, e.g. https://host.tailnet.ts.net (or https://localhost"
-                " until Tailscale Funnel is set up)"
+                "must be a valid URL, e.g. https://host.tailnet.ts.net/garmin (or"
+                " https://localhost until Tailscale Funnel is set up)"
             ) from exc
+        if url.query or url.fragment:
+            raise ValueError("must not have a query string or fragment")
         return value.rstrip("/")
+
+    @property
+    def public_path_prefix(self) -> str:
+        """Path part of PUBLIC_BASE_URL ("/garmin"), or "" when served at the root."""
+        return urlsplit(self.public_base_url).path.rstrip("/")
 
 
 @lru_cache

@@ -10,7 +10,7 @@ See [CLAUDE.md](CLAUDE.md) for the architecture, and
 
 | Route | Exposure | Purpose |
 | --- | --- | --- |
-| `/mcp` | Funnel (public) | MCP server (streamable HTTP), bearer-token protected |
+| `/garmin/mcp` | Funnel (public) | MCP server (streamable HTTP), bearer-token protected |
 | `/authorize`, `/token`, `/register`, `/revoke`, `/.well-known/*`, `/mcp-login` | Funnel | OAuth server for the claude.ai connector |
 | `POST /admin/sync` | tailnet only | Pull a historical range, e.g. `{"start": "2025-10-01", "end": "2026-10-24"}` (optional `"feeds": [...]`) |
 | `GET /healthz` | container only | Health check |
@@ -60,17 +60,23 @@ uv run uvicorn garmin_reasoner.main:create_app --factory --reload
 
    The first sync starts 10 seconds after startup and pulls the last 90 days. Look for
    `sync finished` in the logs.
-4. **Expose via Tailscale.** `sh deploy/tailscale.sh`. This puts the MCP paths on Funnel
-   port **10000** and `/admin` on tailnet-only Serve port 9443. Check with
-   `tailscale funnel status`. Set `PUBLIC_BASE_URL=https://<host>.<tailnet>.ts.net:10000`.
-   The app gets its own port so it never shares an origin with other services on the
-   machine. For example, Home Assistant also publishes `/.well-known/oauth-authorization-server`,
-   and on a shared origin claude.ai would log in to Home Assistant instead.
+4. **Expose via Tailscale.** `sh deploy/tailscale.sh`. This puts the app on Funnel
+   port 443 under `/garmin`, with `/admin` on tailnet-only Serve (port 8443). Set
+   `PUBLIC_BASE_URL=https://<host>.<tailnet>.ts.net/garmin`. Check with
+   `tailscale funnel status`.
+
+   The path prefix lets the app share the hostname with something that owns `/`, such as
+   Home Assistant, and claude.ai only connects on port 443. OAuth discovery for a
+   prefixed server lives at `/.well-known/oauth-authorization-server/garmin`, so it
+   doesn't collide with the other app's `/.well-known/oauth-authorization-server`.
+   Check from outside the tailnet:
+   `curl https://<host>.<tailnet>.ts.net/.well-known/oauth-authorization-server/garmin`
+   should show `"issuer": "https://<host>.<tailnet>.ts.net/garmin"`.
 5. **Load older history** (optional; up to 366 days per call):
 
    ```sh
    curl -u admin:$ADMIN_PASSWORD -H 'Content-Type: application/json' \
-     https://<host>.<tailnet>.ts.net:9443/admin/sync \
+     https://<host>.<tailnet>.ts.net:8443/admin/sync \
      -d '{"start": "2025-07-01", "end": "2026-07-27"}'
    ```
 
@@ -81,7 +87,7 @@ uv run uvicorn garmin_reasoner.main:create_app --factory --reload
    ```
 
    In claude.ai → Settings → Connectors → Add custom connector, use the URL
-   `https://<host>.<tailnet>.ts.net:10000/mcp`. Paste the printed Client ID and Secret under
+   `https://<host>.<tailnet>.ts.net/garmin/mcp`. Paste the printed Client ID and Secret under
    **Advanced settings**. When you connect, `/mcp-login` opens: check that it names Claude
    and a `claude.ai` callback, then enter the admin password. (`... mcp_clients list` /
    `delete <id>` manage clients; deleting one revokes its tokens.)

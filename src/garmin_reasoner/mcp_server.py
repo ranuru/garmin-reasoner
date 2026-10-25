@@ -49,6 +49,12 @@ def build_mcp_server(settings: Settings, provider: SQLiteOAuthProvider) -> MCPSe
     return mcp
 
 
+def public_origin(public_base_url: str) -> str:
+    """scheme://host[:port] of the public URL; Origin headers never carry a path."""
+    url = urlsplit(public_base_url)
+    return f"{url.scheme}://{url.netloc}"
+
+
 def allowed_hosts(public_base_url: str) -> list[str]:
     """Host header values /mcp accepts (DNS rebinding protection).
 
@@ -68,7 +74,11 @@ def build_mcp_app(mcp: MCPServer, settings: Settings) -> Starlette:
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
             allowed_hosts=allowed_hosts(settings.public_base_url),
-            allowed_origins=[settings.public_base_url, "https://claude.ai", "https://claude.com"],
+            allowed_origins=[
+                public_origin(settings.public_base_url),
+                "https://claude.ai",
+                "https://claude.com",
+            ],
         ),
     )
 

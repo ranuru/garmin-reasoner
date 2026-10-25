@@ -285,6 +285,41 @@ class SQLiteOAuthProvider:
         return True
 
 
+class PathPrefix:
+    """ASGI wrapper: serve the app under PUBLIC_BASE_URL's path, e.g. /garmin.
+
+    Lets the app share a hostname with another service (Home Assistant owns `/` on
+    the Funnel host) without the two colliding on OAuth discovery:
+
+    - `/garmin/...` is routed as `/...`.
+    - RFC 8414 puts a path-prefixed issuer's metadata at
+      `/.well-known/oauth-authorization-server/garmin`, so that maps to the SDK's
+      `/.well-known/oauth-authorization-server` route.
+    - The RFC 9728 resource metadata (`/.well-known/oauth-protected-resource/garmin/mcp`)
+      already includes the prefix, so the SDK serves it as is.
+
+    Unprefixed paths pass through unchanged, so tailnet-only access (admin) still works.
+    """
+
+    def __init__(self, app: ASGIApp, prefix: str) -> None:
+        self._app = app
+        self._prefix = prefix.rstrip("/")
+        self._issuer_metadata = f"/.well-known/oauth-authorization-server{self._prefix}"
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if self._prefix and scope["type"] in ("http", "websocket"):
+            path = scope["path"]
+            if path == self._prefix or path.startswith(self._prefix + "/"):
+                scope = self._with_path(scope, path[len(self._prefix) :] or "/")
+            elif path == self._issuer_metadata:
+                scope = self._with_path(scope, "/.well-known/oauth-authorization-server")
+        await self._app(scope, receive, send)
+
+    @staticmethod
+    def _with_path(scope: Scope, path: str) -> Scope:
+        return {**scope, "path": path, "raw_path": path.encode()}
+
+
 class BasicAuthForPostClients:
     """ASGI wrapper: lets `client_secret_post` clients authenticate with HTTP Basic too.
 
@@ -382,7 +417,9 @@ _SECURITY_HEADERS = {
 }
 
 
-def _login_page(request_id: str, client_name: str, redirect_uri: str, error: str = "") -> str:
+def _login_page(
+    action: str, request_id: str, client_name: str, redirect_uri: str, error: str = ""
+) -> str:
     e = html.escape
     error_html = f'<p class="error">{e(error)}</p>' if error else ""
     return f"""<!doctype html>
@@ -402,12 +439,18 @@ def _login_page(request_id: str, client_name: str, redirect_uri: str, error: str
   <p><strong>{e(client_name)}</strong> wants read access to your Garmin data.</p>
   <p>It will be sent to <code>{e(redirect_uri)}</code>.</p>
   {error_html}
-  <form method="post" action="{LOGIN_PATH}">
+  <form method="post" action="{e(action)}">
     <input type="hidden" name="request_id" value="{e(request_id)}">
     <label>Admin password <input type="password" name="password" autofocus required></label>
     <button type="submit">Approve</button>
   </form>
 </body></html>"""
+
+
+def _login_url(request: Request) -> str:
+    # Absolute, so the form posts back here even when served under a path prefix
+    # (a bare "/mcp-login" would go to whatever owns the site root).
+    return request.app.state.settings.public_base_url + LOGIN_PATH
 
 
 def _html(content: str, status_code: int = 200) -> HTMLResponse:
@@ -420,7 +463,7 @@ def login_form(request: Request, request_id: str = "") -> Response:
     described = provider.describe_request(request_id)
     if described is None:
         return _html("<p>This authorization request is unknown or has expired.</p>", 400)
-    return _html(_login_page(request_id, *described))
+    return _html(_login_page(_login_url(request), request_id, *described))
 
 
 @router.post(LOGIN_PATH)
@@ -438,14 +481,19 @@ async def login_submit(request: Request) -> Response:
     if throttle.blocked():
         log.warning("MCP login throttled")
         return _html(
-            _login_page(request_id, *described, error="Too many attempts; try later."), 429
+            _login_page(
+                _login_url(request), request_id, *described, error="Too many attempts; try later."
+            ),
+            429,
         )
 
     expected = request.app.state.settings.admin_password.get_secret_value()
     if not secrets.compare_digest(password.encode(), expected.encode()):
         throttle.record_failure()
         log.warning("failed MCP login attempt")
-        return _html(_login_page(request_id, *described, error="Wrong password."), 401)
+        return _html(
+            _login_page(_login_url(request), request_id, *described, error="Wrong password."), 401
+        )
 
     redirect = provider.approve_request(request_id)
     if redirect is None:
