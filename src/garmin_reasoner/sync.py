@@ -93,7 +93,19 @@ async def _fetch_body_battery(client: GarminClient, start: date, end: date) -> l
     body = await client.get(
         "/wellness-service/wellness/bodyBattery/reports/daily", _date_range(start, end)
     )
-    return _records(body)
+    return [report for report in _records(body) if _has_body_battery_data(report)]
+
+
+def _has_body_battery_data(report: dict[str, Any]) -> bool:
+    """Garmin returns a report for every date asked for, even ones without data (such as
+    before the first watch); in those, every value is null. Migration 7 in `db.py` uses
+    the same test to remove ones stored earlier."""
+    if any(report.get(field) is not None for field in ("charged", "drained", "startTimestampGMT")):
+        return True
+    levels = report.get("bodyBatteryValuesArray") or []
+    return any(
+        isinstance(point, list) and len(point) > 1 and point[1] is not None for point in levels
+    )
 
 
 async def _fetch_weight(client: GarminClient, start: date, end: date) -> list[dict[str, Any]]:

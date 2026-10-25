@@ -108,6 +108,20 @@ MIGRATIONS: list[str] = [
         last_error_at   TEXT
     );
     """,
+    # 7: drop Body Battery reports without any data. Garmin returns one for every date
+    # asked for, so a history sync stored empty ones for days before the first watch. The
+    # sync now skips them (`_has_body_battery_data` in sync.py, which this mirrors).
+    """
+    DELETE FROM summaries
+    WHERE type = 'bodyBattery'
+      AND json_extract(raw_json, '$.charged') IS NULL
+      AND json_extract(raw_json, '$.drained') IS NULL
+      AND json_extract(raw_json, '$.startTimestampGMT') IS NULL
+      AND NOT EXISTS (
+          SELECT 1 FROM json_each(raw_json, '$.bodyBatteryValuesArray') AS point
+          WHERE point.type = 'array' AND json_extract(point.value, '$[1]') IS NOT NULL
+      );
+    """,
 ]
 
 

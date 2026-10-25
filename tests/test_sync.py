@@ -130,6 +130,24 @@ async def test_feed_parses_response(
 
 
 @pytest.mark.anyio
+async def test_body_battery_skips_days_without_data(
+    ctx: sync.SyncContext, conn: sqlite3.Connection, garmin_api: FakeGarminAPI
+) -> None:
+    empty = {"charged": None, "drained": None, "startTimestampGMT": None}
+    garmin_api.serve(
+        "/wellness-service/wellness/bodyBattery/reports/daily",
+        [
+            {"date": "2026-10-01", **empty, "bodyBatteryValuesArray": [[1, None], [2, None]]},
+            {"date": "2026-10-02", "charged": 60, "bodyBatteryValuesArray": [[1, 50]]},
+        ],
+    )
+
+    assert await sync.sync_feed(ctx, sync.FEEDS["bodyBattery"], OCT1, OCT2) == 1
+
+    assert stored(conn, "bodyBattery") == [("2026-10-02", "2026-10-02", None)]
+
+
+@pytest.mark.anyio
 async def test_raw_json_is_kept_whole(
     ctx: sync.SyncContext, conn: sqlite3.Connection, garmin_api: FakeGarminAPI
 ) -> None:

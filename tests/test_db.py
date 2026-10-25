@@ -4,7 +4,46 @@ from pathlib import Path
 
 import pytest
 
-from garmin_reasoner import db
+from garmin_reasoner import db, storage, sync
+
+EMPTY_BODY_BATTERY = {
+    "charged": None,
+    "drained": None,
+    "startTimestampGMT": None,
+    "endTimestampGMT": None,
+    "bodyBatteryValuesArray": [[1736899200001, None], [1736899200002, None]],
+    "bodyBatteryValueDescriptorDTOList": None,
+}
+BODY_BATTERY_CASES = [
+    ({**EMPTY_BODY_BATTERY}, False),  # as Garmin sends days before the first watch
+    ({**EMPTY_BODY_BATTERY, "bodyBatteryValuesArray": None}, False),
+    ({}, False),
+    ({**EMPTY_BODY_BATTERY, "charged": 0}, True),
+    ({**EMPTY_BODY_BATTERY, "startTimestampGMT": "2026-10-01T00:00:00.0"}, True),
+    ({**EMPTY_BODY_BATTERY, "bodyBatteryValuesArray": [[1, None], [2, 45]]}, True),
+    ({"charged": 60, "drained": 40, "bodyBatteryValuesArray": [[1, 50], [2, 55]]}, True),
+]
+
+
+@pytest.mark.parametrize("report, has_data", BODY_BATTERY_CASES)
+def test_migration_7_drops_the_body_battery_reports_the_sync_skips(
+    monkeypatch: pytest.MonkeyPatch, report: dict[str, object], has_data: bool
+) -> None:
+    report = {"date": "2025-01-15", **report}
+    assert sync._has_body_battery_data(report) is has_data
+
+    all_migrations = db.MIGRATIONS
+    conn = db.connect(":memory:")
+    monkeypatch.setattr(db, "MIGRATIONS", all_migrations[:6])
+    db.init_db(conn)
+    storage.upsert_summary(conn, "bodyBattery", "2025-01-15", report, "t", "2025-01-15")
+    storage.upsert_summary(conn, "stress", "2025-01-15", report, "t", "2025-01-15")
+
+    monkeypatch.setattr(db, "MIGRATIONS", all_migrations)
+    db.init_db(conn)
+
+    types = [row["type"] for row in conn.execute("SELECT type FROM summaries ORDER BY type")]
+    assert types == (["bodyBattery", "stress"] if has_data else ["stress"])
 
 
 def test_init_db_sets_schema_version(conn: sqlite3.Connection) -> None:

@@ -189,6 +189,10 @@ uv run uvicorn garmin_reasoner.main:create_app --factory --reload
 - Every feed works. `weight/all` answers HTTP 400 (with an empty body) for valid ranges,
   so weight uses `weight/range?includeAll=true` instead.
 - Weight values come in **grams**, despite the spec saying kilograms.
+- Body Battery returns a report for every date asked for, including days before the
+  first watch, with every value null. The sync skips those (migration 7 removed ones
+  stored earlier).
+- History reaches back to the first watch: a year further back returns no records.
 
 Still undocumented: date-range limits for HRV, weight and activities (the client uses
 conservative chunks), and rate limits (429 and 5xx responses are retried with backoff,
