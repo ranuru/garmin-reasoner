@@ -430,8 +430,6 @@ def test_login_page_csp_allows_redirect_to_client(client: TestClient) -> None:
 
     csp = page.headers["content-security-policy"]
     form_action = next(d for d in csp.split(";") if d.strip().startswith("form-action")).split()
-    assert "'self'" in form_action
-    assert "https://claude.ai" in form_action
-    assert "https://claude.com" in form_action
+    assert form_action == ["form-action", "'self'", "https://claude.ai", "https://claude.com"]
     # Nothing broader than the client origins.
     assert "*" not in csp and "https:" not in form_action
