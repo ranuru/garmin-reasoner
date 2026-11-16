@@ -84,11 +84,12 @@ def test_cli_create_list_delete(
     settings: Settings, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(mcp_clients, "get_settings", lambda: settings)
+    monkeypatch.setattr(mcp_clients, "_show_secret", lambda secret: True)
 
     assert mcp_clients.main(["create", "--name", "Claude"]) == 0
     out = capsys.readouterr().out
     client_id = out.split("OAuth Client ID:")[1].split()[0]
-    assert "OAuth Client Secret:" in out
+    assert "OAuth Client Secret:" not in out
 
     assert mcp_clients.main(["list"]) == 0
     listed = capsys.readouterr().out
