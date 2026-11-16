@@ -290,7 +290,7 @@ def test_key_expiry_warning(caplog: pytest.LogCaptureFixture) -> None:
     assert "expires in 7 days" in caplog.text
 
     sync.warn_if_key_expiring(date(2026, 10, 1), today)
-    assert "expired on 2026-10-01" in caplog.text
+    assert "GARMIN_API_KEY expired" in caplog.text
 
 
 # --- /admin/sync ---
