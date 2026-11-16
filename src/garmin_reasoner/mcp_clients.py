@@ -15,6 +15,7 @@ self-registered ones.
 import argparse
 import asyncio
 import json
+import os
 import secrets
 import sys
 import time
@@ -73,6 +74,17 @@ def delete_client(settings: Settings, client_id: str) -> bool:
         )
 
 
+def _show_secret(secret: str) -> bool:
+    try:
+        fd = os.open("/dev/tty", os.O_WRONLY)
+    except OSError:
+        print("Could not display the client secret: no controlling terminal.", file=sys.stderr)
+        return False
+    with os.fdopen(fd, "w") as terminal:
+        terminal.write(f"OAuth Client Secret: {secret}\n")
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m garmin_reasoner.mcp_clients")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -92,7 +104,8 @@ def main(argv: list[str] | None = None) -> int:
         client = create_client(settings, args.name)
         print("Paste these into the connector's Advanced settings. The secret is shown once.")
         print(f"OAuth Client ID:     {client.client_id}")
-        print(f"OAuth Client Secret: {client.client_secret}")
+        if not _show_secret(client.client_secret):
+            return 1
     elif args.command == "list":
         for client in list_clients(settings):
             print(json.dumps(client))
