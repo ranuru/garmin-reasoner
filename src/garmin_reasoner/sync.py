@@ -261,9 +261,9 @@ def warn_if_key_expiring(expires: date | None, today: date, warn_days: int = 14)
         return
     days_left = (expires - today).days
     if days_left < 0:
-        log.error("GARMIN_API_KEY expired on %s; create a new one in Garmin Connect", expires)
+        log.error("GARMIN_API_KEY expired; create a new one in Garmin Connect")
     elif days_left <= warn_days:
-        log.warning("GARMIN_API_KEY expires in %d days (%s); rotate it soon", days_left, expires)
+        log.warning("GARMIN_API_KEY expires in %d days; rotate it soon", days_left)
 
 
 router = APIRouter(prefix="/admin", dependencies=[Depends(require_admin)])
