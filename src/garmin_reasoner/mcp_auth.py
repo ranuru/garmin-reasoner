@@ -27,11 +27,12 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from mcp.server.auth.provider import (
     AccessToken,
     AuthorizationCode,
     AuthorizationParams,
+    AuthorizeError,
     RefreshToken,
     RegistrationError,
     TokenError,
@@ -51,6 +52,12 @@ REQUEST_TTL_SECONDS = 600
 CODE_TTL_SECONDS = 300
 ACCESS_TTL_SECONDS = 3600
 REFRESH_TTL_SECONDS = 30 * 24 * 3600
+# Caps on what the public, unauthenticated endpoints can make us store.
+MAX_CLIENTS = 50
+MAX_PENDING_REQUESTS = 20
+ABANDONED_CLIENT_SECONDS = 24 * 3600
+# Client IDs made by `python -m garmin_reasoner.mcp_clients create`; never pruned.
+MANUAL_CLIENT_ID_PREFIX = "garmin-reasoner-"
 
 
 def _hash(secret: str) -> str:
@@ -93,11 +100,33 @@ class SQLiteOAuthProvider:
             log.warning("refused MCP client registration for redirect URIs %s", redirect_uris)
             raise RegistrationError("invalid_redirect_uri", "redirect URI is not allowed")
         with self._connect() as conn, conn:
+            # /register is public and unauthenticated, so keep it from filling the database.
+            self._prune_abandoned_clients(conn)
+            count = conn.execute("SELECT COUNT(*) FROM mcp_clients").fetchone()[0]
+            if count >= MAX_CLIENTS:
+                log.warning("refused MCP client registration: %d clients already", count)
+                raise RegistrationError(
+                    "invalid_client_metadata", "too many registered clients; try again later"
+                )
             conn.execute(
                 "INSERT INTO mcp_clients (client_id, info_json, created_at) VALUES (?, ?, ?)",
                 (client_info.client_id, client_info.model_dump_json(), self._now()),
             )
         log.info("registered MCP client %r (%s)", client_info.client_name, client_info.client_id)
+
+    def _prune_abandoned_clients(self, conn: sqlite3.Connection) -> None:
+        """Delete self-registered clients that never got (or no longer hold) any grant.
+
+        Clients made with `mcp_clients create` are kept: their ID is pasted into claude.ai
+        by hand. A pruned self-registered client simply registers again when it next connects.
+        """
+        conn.execute(
+            "DELETE FROM mcp_clients WHERE created_at < ? AND client_id NOT LIKE ?"
+            " AND client_id NOT IN (SELECT client_id FROM mcp_tokens)"
+            " AND client_id NOT IN (SELECT client_id FROM mcp_auth_codes)"
+            " AND client_id NOT IN (SELECT client_id FROM mcp_auth_requests)",
+            (self._now() - ABANDONED_CLIENT_SECONDS, MANUAL_CLIENT_ID_PREFIX + "%"),
+        )
 
     # --- authorization ---
 
@@ -111,6 +140,10 @@ class SQLiteOAuthProvider:
                 "DELETE FROM mcp_auth_requests WHERE created_at < ?",
                 (self._now() - REQUEST_TTL_SECONDS,),
             )
+            pending = conn.execute("SELECT COUNT(*) FROM mcp_auth_requests").fetchone()[0]
+            if pending >= MAX_PENDING_REQUESTS:
+                log.warning("refused MCP authorization: %d requests already pending", pending)
+                raise AuthorizeError("temporarily_unavailable", "too many pending requests")
             conn.execute(
                 "INSERT INTO mcp_auth_requests (request_id, client_id, params_json, created_at)"
                 " VALUES (?, ?, ?, ?)",
@@ -202,6 +235,9 @@ class SQLiteOAuthProvider:
         grant_id = secrets.token_urlsafe(16)
         access, refresh = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         now = self._now()
+        # Housekeeping: expired codes and tokens are useless, so don't keep them around.
+        conn.execute("DELETE FROM mcp_tokens WHERE expires_at <= ?", (now,))
+        conn.execute("DELETE FROM mcp_auth_codes WHERE expires_at <= ?", (now,))
         conn.executemany(
             "INSERT INTO mcp_tokens (token_hash, kind, grant_id, client_id, scopes, expires_at)"
             " VALUES (?, ?, ?, ?, ?, ?)",
@@ -285,11 +321,25 @@ class SQLiteOAuthProvider:
         return True
 
 
+# Routes the public internet may reach (after the prefix is stripped): the MCP endpoint
+# and the OAuth flow claude.ai drives. Everything else (the health check) is for the
+# container only.
+PUBLIC_PATHS = frozenset({"/mcp", "/authorize", "/token", "/register", "/revoke", LOGIN_PATH})
+PUBLIC_PATH_PREFIXES = (
+    "/.well-known/oauth-authorization-server",
+    "/.well-known/oauth-protected-resource",
+)
+
+
+def is_public_path(path: str) -> bool:
+    return path in PUBLIC_PATHS or path.startswith(PUBLIC_PATH_PREFIXES)
+
+
 class PathPrefix:
     """ASGI wrapper: serve the app under PUBLIC_BASE_URL's path, e.g. /garmin.
 
-    Lets the app share a hostname with another service (Home Assistant owns `/` on
-    the Funnel host) without the two colliding on OAuth discovery:
+    Lets the app share a hostname with another service that owns `/` without the two
+    colliding on OAuth discovery:
 
     - `/garmin/...` is routed as `/...`.
     - RFC 8414 puts a path-prefixed issuer's metadata at
@@ -298,7 +348,10 @@ class PathPrefix:
     - The RFC 9728 resource metadata (`/.well-known/oauth-protected-resource/garmin/mcp`)
       already includes the prefix, so the SDK serves it as is.
 
-    Unprefixed paths pass through unchanged, so tailnet-only access (admin) still works.
+    Funnel forwards everything under the prefix from the public internet, so a prefixed
+    request may only reach the public routes (`is_public_path`); anything else, such as
+    `/garmin/healthz`, gets a 404 as if it didn't exist. Unprefixed paths pass through
+    unchanged, for the container's own health check.
     """
 
     def __init__(self, app: ASGIApp, prefix: str) -> None:
@@ -310,10 +363,20 @@ class PathPrefix:
         if self._prefix and scope["type"] in ("http", "websocket"):
             path = scope["path"]
             if path == self._prefix or path.startswith(self._prefix + "/"):
-                scope = self._with_path(scope, path[len(self._prefix) :] or "/")
+                stripped = path[len(self._prefix) :] or "/"
+                if not is_public_path(stripped):
+                    return await self._not_found(scope, receive, send)
+                scope = self._with_path(scope, stripped)
             elif path == self._issuer_metadata:
                 scope = self._with_path(scope, "/.well-known/oauth-authorization-server")
         await self._app(scope, receive, send)
+
+    @staticmethod
+    async def _not_found(scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        await JSONResponse({"detail": "Not Found"}, status_code=404)(scope, receive, send)
 
     @staticmethod
     def _with_path(scope: Scope, path: str) -> Scope:
@@ -451,6 +514,8 @@ def _login_page(
   <h1>Authorize access</h1>
   <p><strong>{e(client_name)}</strong> wants read access to your Garmin data.</p>
   <p>It will be sent to <code>{e(redirect_uri)}</code>.</p>
+  <p>Only approve if you started this yourself, just now, by connecting from your AI assistant.
+     Never approve a link someone sent you.</p>
   {error_html}
   <form method="post" action="{e(action)}">
     <input type="hidden" name="request_id" value="{e(request_id)}">

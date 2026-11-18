@@ -1,4 +1,5 @@
-"""Client for the Garmin Connect Personal API (spec: docs/garmin-personal-api.json).
+"""Client for the Garmin Connect Personal API (see Garmin's OpenAPI spec in
+its Personal API docs).
 
 Auth: the personal API key is exchanged for a short-lived access token
 (`POST .../personal-api-key/token` with `Authorization: ApiKey <key>`). Garmin returns

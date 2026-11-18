@@ -5,8 +5,10 @@ import sqlite3
 from datetime import date
 from typing import Any
 
-# Kept in raw storage but never handed to a model: account identifiers, profile
-# images, and exact GPS coordinates (an activity's start point is usually home).
+# Kept in raw storage but never handed to a model: account and device identifiers,
+# profile images, and exact GPS coordinates (an activity's start point is usually
+# home). Removed at any depth: sleep records, for example, carry
+# userProfilePk inside nested objects such as sleepNeed and dailyNapDTOS.
 HIDDEN_FIELDS = frozenset(
     {
         "userId",
@@ -22,6 +24,7 @@ HIDDEN_FIELDS = frozenset(
         "ownerProfileImageUrlLarge",
         "activityLikeDisplayNames",
         "activityLikeProfileImageUrls",
+        "deviceId",
         "startLatitude",
         "startLongitude",
         "endLatitude",
@@ -69,5 +72,9 @@ def data_overview(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def _without_hidden(summary: dict[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in summary.items() if k not in HIDDEN_FIELDS}
+def _without_hidden(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _without_hidden(v) for k, v in value.items() if k not in HIDDEN_FIELDS}
+    if isinstance(value, list):
+        return [_without_hidden(v) for v in value]
+    return value

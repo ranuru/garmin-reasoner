@@ -27,6 +27,7 @@ def backup_database(database_path: Path, backup_dir: Path, keep: int, now: datet
     # sqlite3's backup API copies a consistent snapshot even while the app is writing.
     with closing(db.connect(database_path)) as source, closing(sqlite3.connect(partial)) as dest:
         source.backup(dest)
+    partial.chmod(0o600)  # health data and OAuth state: owner only
     partial.replace(target)  # atomic: a half-written file never looks like a backup
 
     for old in sorted(backup_dir.glob(f"{PREFIX}*.db"))[:-keep]:
@@ -39,6 +40,7 @@ def main() -> None:
     from garmin_reasoner.config import get_settings
 
     logging.basicConfig(level=logging.INFO)
+    db.restrict_new_files()
     settings = get_settings()
     backup_database(
         settings.database_path, settings.backup_dir, settings.backup_keep, datetime.now(UTC)

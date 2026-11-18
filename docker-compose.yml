@@ -21,3 +21,6 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    # Caps, so a runaway request or bug can't take the rest of the server down with it.
+    mem_limit: 1g
+    pids_limit: 128

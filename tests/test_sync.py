@@ -1,4 +1,4 @@
-"""Sync tests against fake Personal API responses shaped like docs/garmin-personal-api.json."""
+"""Sync tests against fake Personal API responses shaped like Garmin's Personal API spec."""
 
 import json
 import sqlite3
@@ -293,52 +293,52 @@ def test_key_expiry_warning(caplog: pytest.LogCaptureFixture) -> None:
     assert "GARMIN_API_KEY expired" in caplog.text
 
 
-# --- /admin/sync ---
+# --- history sync from the command line ---
 
 
-def test_manual_sync_requires_admin(client: TestClient) -> None:
-    body = {"start": "2026-10-01", "end": "2026-10-02"}
-    assert client.post("/admin/sync", json=body).status_code == 401
-
-
-def test_manual_sync_pulls_requested_feeds(
-    client: TestClient,
-    conn: sqlite3.Connection,
-    garmin_api: FakeGarminAPI,
-    admin_auth: tuple[str, str],
+@pytest.mark.anyio
+async def test_history_sync_pulls_requested_feeds(
+    settings: Settings, conn: sqlite3.Connection, garmin_api: FakeGarminAPI
 ) -> None:
     garmin_api.serve(
         "/hrv-service/hrv/daily/2026-10-01/2026-10-02",
         {"hrvSummaries": [{"calendarDate": "2026-10-01"}]},
     )
+    http = httpx.AsyncClient(transport=httpx.MockTransport(garmin_api.handler))
 
-    response = client.post(
-        "/admin/sync",
-        json={"start": "2026-10-01", "end": "2026-10-02", "feeds": ["hrv"]},
-        auth=admin_auth,
+    results = await sync.history_sync(
+        settings, date(2026, 10, 1), date(2026, 10, 2), ["hrv"], http, retry_base_delay=0
     )
 
-    assert response.status_code == 202
-    assert response.json() == {"feeds": ["hrv"], "start": "2026-10-01", "end": "2026-10-02"}
+    assert results == {"hrv": 1}
     assert stored(conn, "hrv") == [("2026-10-01", "2026-10-01", None)]
 
 
+def test_history_args() -> None:
+    assert sync.parse_history_args(["2026-10-01", "2026-10-02", "--feeds", "hrv"]) == (
+        date(2026, 10, 1),
+        date(2026, 10, 2),
+        ["hrv"],
+    )
+    assert sync.parse_history_args(["2026-10-01", "2026-10-02"])[2] == list(sync.FEEDS)
+
+
 @pytest.mark.parametrize(
-    "body",
+    "argv",
     [
-        {"start": "2026-10-01", "end": "2026-10-02", "feeds": ["menstrualcycle"]},
-        {"start": "2026-10-02", "end": "2026-10-01"},
-        {"start": "2024-01-01", "end": "2026-10-01"},
+        ["2026-10-01", "2026-10-02", "--feeds", "menstrualcycle"],
+        ["2026-10-02", "2026-10-01"],
+        ["2026-13-01", "2026-10-01"],
     ],
 )
-def test_manual_sync_validates(
-    client: TestClient,
-    garmin_api: FakeGarminAPI,
-    admin_auth: tuple[str, str],
-    body: dict[str, object],
-) -> None:
-    assert client.post("/admin/sync", json=body, auth=admin_auth).status_code == 422
-    assert garmin_api.requests == []
+def test_history_args_are_validated(argv: list[str]) -> None:
+    with pytest.raises(SystemExit):
+        sync.parse_history_args(argv)
+
+
+def test_there_is_no_admin_route(client: TestClient) -> None:
+    body = {"start": "2026-10-01", "end": "2026-10-02"}
+    assert client.post("/admin/sync", json=body, auth=("admin", "x" * 16)).status_code == 404
 
 
 @pytest.mark.anyio

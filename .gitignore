@@ -25,5 +25,10 @@ build/
 .vscode/
 .idea/
 
-# Claude Code local settings
-.claude/settings.local.json
+# Claude Code files (settings, skills, local notes): kept out of the repo
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+
+# Garmin's Personal API spec: keep a local copy for reference, but it is not ours to redistribute
+docs/garmin-personal-api.json

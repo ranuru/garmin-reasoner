@@ -27,4 +27,7 @@ ENV PATH="/app/.venv/bin:$PATH" \
 EXPOSE 8000
 HEALTHCHECK --interval=60s --timeout=5s \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
-CMD ["uvicorn", "garmin_reasoner.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+# --no-server-header: don't advertise the server software and version.
+# --limit-concurrency: answer 503 instead of piling up work under a flood of requests.
+CMD ["uvicorn", "garmin_reasoner.main:create_app", "--factory", "--host", "0.0.0.0", \
+     "--port", "8000", "--no-server-header", "--limit-concurrency", "64"]

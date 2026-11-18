@@ -80,6 +80,13 @@ def allowed_hosts(public_base_url: str) -> list[str]:
     return sorted({url.netloc, url.hostname or url.netloc})
 
 
+def allowed_origins(settings: Settings) -> list[str]:
+    """Origin header values /mcp accepts: our own, plus those of the MCP clients allowed
+    to connect (MCP_ALLOWED_REDIRECT_URIS), for clients that call from a browser."""
+    clients = {public_origin(uri) for uri in settings.mcp_allowed_redirect_uris}
+    return sorted({public_origin(settings.public_base_url), *clients})
+
+
 def build_mcp_app(mcp: MCPServer, settings: Settings) -> Starlette:
     return mcp.streamable_http_app(
         streamable_http_path="/mcp",
@@ -89,11 +96,7 @@ def build_mcp_app(mcp: MCPServer, settings: Settings) -> Starlette:
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
             allowed_hosts=allowed_hosts(settings.public_base_url),
-            allowed_origins=[
-                public_origin(settings.public_base_url),
-                "https://claude.ai",
-                "https://claude.com",
-            ],
+            allowed_origins=allowed_origins(settings),
         ),
     )
 

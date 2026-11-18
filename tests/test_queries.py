@@ -42,6 +42,27 @@ def test_hides_identifiers_and_gps(conn: sqlite3.Connection) -> None:
     assert activity == {"activityId": 1, "activityName": "Morning Run", "locationName": "Oslo"}
 
 
+def test_hides_identifiers_in_nested_objects(conn: sqlite3.Connection) -> None:
+    add(
+        conn,
+        "sleeps",
+        "2026-10-01",
+        "2026-10-01",
+        calendarDate="2026-10-01",
+        userProfilePK=123,
+        sleepNeed={"userProfilePk": 123, "deviceId": 456, "actual": 480},
+        dailyNapDTOS=[{"userProfilePK": 123, "deviceId": 456, "napTimeSec": 1200}],
+    )
+
+    [sleep] = queries.summaries_in_range(conn, "sleeps", date(2026, 10, 1), date(2026, 10, 1))
+
+    assert sleep == {
+        "calendarDate": "2026-10-01",
+        "sleepNeed": {"actual": 480},
+        "dailyNapDTOS": [{"napTimeSec": 1200}],
+    }
+
+
 def test_date_span(conn: sqlite3.Connection) -> None:
     add(conn, "dailies", "a", "2026-10-03")
     add(conn, "sleeps", "b", "2026-09-30")

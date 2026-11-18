@@ -1,9 +1,10 @@
 #!/usr/bin/env sh
-# Expose the app (listening on 127.0.0.1:8000) through the host's Tailscale.
+# Expose the app (listening on 127.0.0.1:8000) to the internet with Tailscale Funnel.
+# One option among several: any HTTPS reverse proxy or tunnel works (see README.md).
 #
-# - Funnel (public internet, port 443): the app under a path prefix, next to whatever
-#   owns "/" on this host (Home Assistant). claude.ai only connects on 443.
-# - Serve (tailnet only, ADMIN_PORT): admin routes. Never put these on Funnel.
+# Funnel (public internet, port 443) serves the app under a path prefix, next to
+# whatever may own "/" on this host. claude.ai only connects on 443. The app itself
+# only answers the MCP and OAuth routes under the prefix (PUBLIC_PATHS in mcp_auth.py).
 #
 # PREFIX must match the path of PUBLIC_BASE_URL, e.g.
 #   PUBLIC_BASE_URL=https://host.tailnet.ts.net/garmin  ->  PREFIX=/garmin (the default)
@@ -18,7 +19,6 @@ set -eu
 
 TARGET="http://127.0.0.1:8000"
 PREFIX="${PREFIX:-/garmin}"
-ADMIN_PORT="${ADMIN_PORT:-8443}"
 
 for path in \
     "$PREFIX" \
@@ -26,7 +26,5 @@ for path in \
     "/.well-known/oauth-protected-resource$PREFIX"; do
     tailscale funnel --bg --https=443 --set-path="$path" "$TARGET$path"
 done
-
-tailscale serve --bg --https="$ADMIN_PORT" --set-path=/admin "$TARGET/admin"
 
 tailscale funnel status

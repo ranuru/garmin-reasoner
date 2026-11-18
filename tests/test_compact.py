@@ -7,7 +7,7 @@ import pytest
 
 from garmin_reasoner import compact, storage
 
-# --- fixture records, shaped like the Personal API's (see docs/garmin-personal-api.json) ---
+# --- fixture records, shaped like the Personal API's (see Garmin's Personal API spec) ---
 
 
 def _epoch_ms(moment: datetime) -> int:

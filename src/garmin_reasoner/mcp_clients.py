@@ -25,12 +25,12 @@ from mcp.shared.auth import OAuthClientInformationFull
 
 from garmin_reasoner import db
 from garmin_reasoner.config import Settings, get_settings
-from garmin_reasoner.mcp_auth import SCOPE, SQLiteOAuthProvider
+from garmin_reasoner.mcp_auth import MANUAL_CLIENT_ID_PREFIX, SCOPE, SQLiteOAuthProvider
 
 
 def create_client(settings: Settings, name: str) -> OAuthClientInformationFull:
     client = OAuthClientInformationFull(
-        client_id=f"garmin-reasoner-{secrets.token_urlsafe(12)}",
+        client_id=f"{MANUAL_CLIENT_ID_PREFIX}{secrets.token_urlsafe(12)}",
         client_secret=secrets.token_urlsafe(32),
         client_id_issued_at=int(time.time()),
         client_secret_expires_at=None,
@@ -95,6 +95,7 @@ def main(argv: list[str] | None = None) -> int:
     delete.add_argument("client_id")
     args = parser.parse_args(argv)
 
+    db.restrict_new_files()
     settings = get_settings()
     conn = db.connect(settings.database_path)
     db.init_db(conn)

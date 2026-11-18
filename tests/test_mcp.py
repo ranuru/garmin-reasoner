@@ -16,6 +16,7 @@ from fakes import ADMIN_PASSWORD, PUBLIC_BASE_URL, FakeClock
 from fastapi.testclient import TestClient
 
 from garmin_reasoner import storage
+from garmin_reasoner.config import Settings
 
 REDIRECT_URI = "https://claude.ai/api/mcp/auth_callback"
 
@@ -433,3 +434,13 @@ def test_login_page_csp_allows_redirect_to_client(client: TestClient) -> None:
     assert form_action == ["form-action", "'self'", "https://claude.ai", "https://claude.com"]
     # Nothing broader than the client origins.
     assert "*" not in csp and "https:" not in form_action
+
+
+def test_allowed_origins_follow_allowed_clients(settings: Settings) -> None:
+    from garmin_reasoner.mcp_server import allowed_origins
+
+    other = settings.model_copy(
+        update={"mcp_allowed_redirect_uris": ["https://chat.example.com/oauth/callback"]}
+    )
+    assert allowed_origins(other) == ["https://chat.example.com", PUBLIC_BASE_URL]
+    assert "https://claude.ai" in allowed_origins(settings)

@@ -1,7 +1,7 @@
 """Serving under a path prefix (PUBLIC_BASE_URL=https://host/garmin) next to another app.
 
 On the real host, Tailscale Funnel sends only `/garmin/...` and the two prefixed
-`/.well-known/...` paths to this app; everything else (`/`) goes to Home Assistant. The
+`/.well-known/...` paths to this app; everything else (`/`) belongs to something else. The
 flow below starts from the MCP URL and follows only URLs the server hands out
 (discovery, redirects, the login form), asserting each one would reach this app.
 """
@@ -139,19 +139,9 @@ def test_connector_flow_stays_inside_routed_paths(client: TestClient) -> None:
     assert initialized.status_code == 200, initialized.text
 
 
-def test_unprefixed_admin_still_works_over_the_tailnet(
-    client: TestClient, admin_auth: tuple[str, str]
-) -> None:
-    # Tailnet-only Serve maps the whole app at "/", so admin paths stay unprefixed.
-    response = client.post(
-        f"{ORIGIN}/admin/sync", json={"start": "2026-10-02", "end": "2026-10-01"}, auth=admin_auth
-    )
-    assert response.status_code == 422  # reached the handler (validation), not 404
-
-
 def test_prefix_is_not_matched_loosely(client: TestClient) -> None:
-    assert client.get(f"{ORIGIN}/garminx/healthz").status_code == 404
-    assert client.get(f"{BASE}/healthz").json() == {"status": "ok"}
+    assert client.get(f"{ORIGIN}/garminx/mcp-login").status_code == 404
+    assert client.get(f"{BASE}/mcp-login").status_code == 400  # reached the handler
 
 
 @pytest.mark.parametrize("url", ["https://h.ts.net/garmin?x=1", "https://h.ts.net/garmin#f"])

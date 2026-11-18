@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     garmin_api_key_expires: date | None = None
     garmin_api_base_url: str = "https://personal.connectapi.garmin.com"
 
-    # Guards admin routes and the MCP login page, which is reachable from the internet.
+    # Approves Claude's access on the MCP login page, which is reachable from the internet.
     admin_password: SecretStr
     # Public HTTPS URL (Tailscale Funnel), e.g. https://host.tailnet.ts.net/garmin. A path
     # lets the app share the hostname with other services. Used as the OAuth issuer and
@@ -28,7 +28,8 @@ class Settings(BaseSettings):
     public_base_url: str
     database_path: Path = Path("data/garmin.db")
 
-    # Only these clients may obtain MCP tokens (claude.ai's custom connector callback).
+    # Only MCP clients with these OAuth callback URLs may connect. The default is
+    # claude.ai's custom connector; add another client's exact callback to allow it.
     mcp_allowed_redirect_uris: list[str] = [
         "https://claude.ai/api/mcp/auth_callback",
         "https://claude.com/api/mcp/auth_callback",

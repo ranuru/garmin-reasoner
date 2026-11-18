@@ -7,23 +7,31 @@ re-pulling a range is always safe.
 The scheduled sync re-pulls from a few days before each feed's `synced_through` date up
 to tomorrow. That picks up late uploads and also heals any downtime, however long,
 without a separate gap-check.
+
+Older history is pulled from the command line, on the server:
+
+    docker compose exec garmin-reasoner python -m garmin_reasoner.sync 2025-01-01 2025-12-31
 """
 
+import argparse
+import asyncio
 import logging
+import sys
+import time
 from collections.abc import Awaitable, Callable
-from contextlib import closing
+from contextlib import AsyncExitStack, closing
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
-from pydantic import BaseModel
 
 from garmin_reasoner import db, storage
-from garmin_reasoner.auth import require_admin
 from garmin_reasoner.garmin import Clock, GarminAPIError, GarminClient
+
+if TYPE_CHECKING:
+    from garmin_reasoner.config import Settings
 
 log = logging.getLogger(__name__)
 
@@ -31,7 +39,6 @@ log = logging.getLogger(__name__)
 RecordKey = tuple[str, str | None, int | None] | None
 Fetch = Callable[[GarminClient, date, date], Awaitable[list[dict[str, Any]]]]
 
-MAX_MANUAL_SYNC_DAYS = 366
 # How far back the scheduled sync goes the first time, or after a very long outage.
 MAX_CATCH_UP_DAYS = 90
 ACTIVITY_PAGE_SIZE = 100
@@ -266,29 +273,64 @@ def warn_if_key_expiring(expires: date | None, today: date, warn_days: int = 14)
         log.warning("GARMIN_API_KEY expires in %d days; rotate it soon", days_left)
 
 
-router = APIRouter(prefix="/admin", dependencies=[Depends(require_admin)])
+# --- command line: pull a historical range ---
 
 
-class SyncBody(BaseModel):
-    start: date
-    end: date
-    feeds: list[str] | None = None
+def parse_history_args(argv: list[str] | None) -> tuple[date, date, list[str]]:
+    parser = argparse.ArgumentParser(
+        prog="python -m garmin_reasoner.sync",
+        description="Pull a historical date range from Garmin (e.g. on first setup).",
+    )
+    parser.add_argument("start", type=date.fromisoformat, help="first date, YYYY-MM-DD")
+    parser.add_argument("end", type=date.fromisoformat, help="last date, YYYY-MM-DD")
+    parser.add_argument(
+        "--feeds",
+        nargs="+",
+        choices=sorted(FEEDS),
+        metavar="FEED",
+        help=f"only these feeds (default: all of {', '.join(FEEDS)})",
+    )
+    args = parser.parse_args(argv)
+    if args.end < args.start:
+        parser.error("end must not be before start")
+    return args.start, args.end, args.feeds or list(FEEDS)
 
 
-@router.post("/sync", status_code=202)
-async def manual_sync(
-    body: SyncBody, request: Request, background: BackgroundTasks
-) -> dict[str, object]:
-    """Pull a historical range (e.g. on first setup). Runs in the background."""
-    feeds = body.feeds or list(FEEDS)
-    unknown = sorted(set(feeds) - set(FEEDS))
-    if unknown:
-        raise HTTPException(422, f"unknown feeds: {unknown}; available: {sorted(FEEDS)}")
-    if body.end < body.start:
-        raise HTTPException(422, "end must not be before start")
-    if (body.end - body.start).days + 1 > MAX_MANUAL_SYNC_DAYS:
-        raise HTTPException(422, f"at most {MAX_MANUAL_SYNC_DAYS} days per request")
+async def history_sync(
+    settings: "Settings",
+    start: date,
+    end: date,
+    feeds: list[str],
+    http: httpx.AsyncClient | None = None,
+    retry_base_delay: float = 5.0,
+) -> dict[str, int | str]:
+    async with AsyncExitStack() as stack:
+        if http is None:
+            http = await stack.enter_async_context(httpx.AsyncClient(timeout=60.0))
+        client = GarminClient(
+            http,
+            settings.garmin_api_base_url,
+            settings.garmin_api_key,
+            retry_base_delay=retry_base_delay,
+        )
+        ctx = SyncContext(settings.database_path, client, time.time)
+        return await run_sync(ctx, {name: (start, end) for name in feeds})
 
-    ctx: SyncContext = request.app.state.sync
-    background.add_task(run_sync, ctx, {name: (body.start, body.end) for name in feeds})
-    return {"feeds": feeds, "start": body.start.isoformat(), "end": body.end.isoformat()}
+
+def main(argv: list[str] | None = None) -> int:
+    """Run a history sync in the foreground. A command rather than an HTTP route, so
+    there is no admin endpoint on the network to protect."""
+    from garmin_reasoner.config import get_settings
+
+    start, end, feeds = parse_history_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    db.restrict_new_files()
+    settings = get_settings()
+    with closing(db.connect(settings.database_path)) as conn:
+        db.init_db(conn)
+    results = asyncio.run(history_sync(settings, start, end, feeds))
+    return 1 if any(isinstance(result, str) for result in results.values()) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

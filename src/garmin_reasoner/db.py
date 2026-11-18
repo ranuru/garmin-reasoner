@@ -4,9 +4,12 @@ Migrations are an ordered list of SQL scripts. `PRAGMA user_version` records how
 have been applied, so `init_db` is safe to call on every startup.
 """
 
+import logging
 import os
 import sqlite3
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 MIGRATIONS: list[str] = [
     # 1: raw summaries. Garmin can resend a summary, so writes upsert on (type, summary_id).
@@ -142,6 +145,30 @@ def ensure_writable_dir(directory: Path) -> None:
             f"cannot write to {directory} (running as uid {uid}). On the host, give that"
             f" user the mounted folder, e.g.: sudo chown -R {uid}:{uid} data backups"
         )
+
+
+def restrict_new_files() -> None:
+    """Make files this process creates (database, WAL, backups) private to its user.
+
+    They hold health data and OAuth state, so other users on the host shouldn't be able
+    to read them through the bind-mounted folders.
+    """
+    os.umask(0o077)
+
+
+def restrict_permissions(directory: Path) -> None:
+    """Make `directory` and the files directly in it private to their owner.
+
+    Fixes files created before `restrict_new_files` (or by another process). Entries
+    owned by someone else are left alone.
+    """
+    for path in [directory, *directory.iterdir()]:
+        mode = 0o700 if path.is_dir() else 0o600
+        try:
+            if path.stat().st_mode & 0o777 != mode:
+                path.chmod(mode)
+        except PermissionError:
+            log.warning("cannot restrict permissions of %s (not its owner)", path)
 
 
 def connect(path: Path | str) -> sqlite3.Connection:

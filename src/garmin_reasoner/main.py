@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 import httpx
 from fastapi import FastAPI
 
-from garmin_reasoner import backup, db, garmin, jobs, mcp_auth, mcp_server, sync
+from garmin_reasoner import backup, db, garmin, jobs, mcp_auth, mcp_server, security, sync
 from garmin_reasoner.config import Settings, get_settings
 
 BACKUP_INTERVAL_SECONDS = 24 * 3600
@@ -36,12 +36,17 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        db.restrict_new_files()
         db.ensure_writable_dir(settings.database_path.parent)
         if settings.jobs_enabled:
             db.ensure_writable_dir(settings.backup_dir)
         conn = db.connect(settings.database_path)
         db.init_db(conn)
         conn.close()
+        # Also tighten files left world-readable by older versions.
+        db.restrict_permissions(settings.database_path.parent)
+        if settings.jobs_enabled:
+            db.restrict_permissions(settings.backup_dir)
 
         async with AsyncExitStack() as stack:
             http = http_client or await stack.enter_async_context(httpx.AsyncClient(timeout=60.0))
@@ -60,13 +65,19 @@ def create_app(
                 start_jobs(app, settings, stack)
             yield
 
-    app = FastAPI(title="garmin-reasoner", lifespan=lifespan)
+    # No /docs, /redoc or /openapi.json: they would map the app for anyone who finds it.
+    app = FastAPI(
+        title="garmin-reasoner", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
+    )
     app.state.settings = settings
     app.state.mcp_provider = provider
     app.state.login_throttle = mcp_auth.LoginThrottle(clock=clock)
-    # Outermost: strips PUBLIC_BASE_URL's path (e.g. /garmin) before anything routes.
+    # The last one added runs first: headers on every response, then the body limit,
+    # then stripping PUBLIC_BASE_URL's path (e.g. /garmin), which also keeps the public
+    # internet away from everything but the MCP and OAuth routes.
     app.add_middleware(mcp_auth.PathPrefix, prefix=settings.public_path_prefix)
-    app.include_router(sync.router)
+    app.add_middleware(security.BodySizeLimit)
+    app.add_middleware(security.SecurityHeaders)
     app.include_router(mcp_auth.router)
 
     @app.get("/healthz")

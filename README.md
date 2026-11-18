@@ -1,21 +1,329 @@
 # garmin-reasoner
 
-Personal service that pulls my Garmin Connect data through Garmin's
-[Personal API](https://developer.garmin.com/gc-developer-program/personal/personal-api/),
-stores it as raw JSON in SQLite, and exposes it to Claude through a remote MCP server.
-See [CLAUDE.md](CLAUDE.md) for the architecture, and
-[docs/garmin-personal-api.json](docs/garmin-personal-api.json) for Garmin's OpenAPI spec.
+**Talk to an AI assistant about your own Garmin data.** A small self-hosted service
+that syncs your Garmin Connect history into SQLite and serves it as a remote
+[MCP](https://modelcontextprotocol.io) server. You can connect it to
+[Claude](https://claude.ai) or any other assistant that supports MCP connectors, and ask
+questions like:
 
-## Routes
+> *How has my sleep been the last three months, and does it change on days I run?*
+>
+> *Compare my resting heart rate and HRV this month with the same month last year.*
+>
+> *Which of my runs this autumn had the best pace at the lowest heart rate?*
 
-| Route | Exposure | Purpose |
+It runs on a machine you own, keeps the full raw history, and only hands the model
+read-only, privacy-filtered data.
+
+> [!NOTE]
+> This is an independent hobby project. It is not affiliated with or endorsed by Garmin
+> or Anthropic.
+
+## Contents
+
+- [Features](#features)
+- [How it works](#how-it-works)
+- [Requirements](#requirements)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [What the model can see](#what-the-model-can-see)
+- [Security](#security)
+- [Operations](#operations)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
+- [License](#license)
+
+## Features
+
+- **Hourly sync** from Garmin's free
+  [Personal API](https://developer.garmin.com/gc-developer-program/personal/personal-api/):
+  daily summaries, sleep, HRV, stress, Body Battery, weight and activities. It catches up
+  on its own after downtime and picks up late watch uploads.
+- **Raw history kept forever.** Every record is stored as Garmin sent it, so new
+  questions never need a re-download.
+- **Token-efficient tools.** Compact summaries (one flat row per night, day,
+  activity, week or month) come first, with raw JSON available for drill-down.
+- **Private by default.** GPS coordinates and account or device identifiers never reach
+  the model. Menstrual cycle and nutrition data are never synced.
+- **Real authentication.** Its own OAuth server for MCP connectors, with every
+  connection approved by you, and nothing else reachable from the internet.
+- **Low maintenance.** One Docker container, SQLite, daily backups, and a warning before
+  your API key expires.
+
+## How it works
+
+```
+ Watch ──▶ Garmin Connect ◀── hourly pull (API key) ── garmin-reasoner ──▶ SQLite
+                                                              │
+     Claude / MCP client ── OAuth + MCP over HTTPS ──▶ /mcp  (via your reverse proxy)
+```
+
+A single Python (FastAPI) service does three things:
+
+1. **Syncs** each feed from the Garmin Personal API on a schedule and upserts the raw
+   JSON into SQLite.
+2. **Serves an MCP server** at `/mcp` (streamable HTTP) with read-only tools over the
+   stored data.
+3. **Runs an OAuth authorization server** for MCP connectors. Approving a
+   connection takes your admin password.
+
+Assistants like claude.ai connect to the server from the internet, so the app needs a public HTTPS
+URL. You can get one with any reverse proxy or tunnel. Admin tasks (history sync,
+managing connections, backups) are commands you run on the machine, so the network only
+ever sees the MCP and OAuth routes.
+
+## Requirements
+
+- A **Garmin Connect** account with a watch, and a **Personal API key** (free, created in
+  Garmin Connect on the web).
+- A machine with **Docker** and Docker Compose: a home server, a VPS, or your laptop.
+  It syncs while it's running and catches up after downtime, but your assistant can
+  only reach it while it's on, so an always-on machine works best.
+- A way to give it a **public HTTPS URL**, such as
+  [Tailscale Funnel](https://tailscale.com/kb/1223/funnel),
+  [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/),
+  or a reverse proxy like [Caddy](https://caddyserver.com) or nginx with your own domain.
+- An **AI assistant that supports remote MCP servers** with OAuth, such as a Claude plan
+  with custom connectors.
+
+## Quick start
+
+### 1. Get the code and a Garmin API key
+
+```sh
+git clone https://github.com/ranuru/garmin-reasoner.git
+cd garmin-reasoner
+cp .env.example .env
+chmod 600 .env
+```
+
+In Garmin Connect on the web, go to **Settings → Personal API Key** and create a key. It
+is shown only once. Put it in `.env` as `GARMIN_API_KEY`, and put the expiry date you
+picked in `GARMIN_API_KEY_EXPIRES`.
+
+### 2. Fill in the rest of `.env`
+
+```sh
+PUBLIC_BASE_URL=https://<your-host>/garmin
+ADMIN_PASSWORD=<generate one: openssl rand -base64 24>
+```
+
+`PUBLIC_BASE_URL` is the address your assistant will use (see step 4). `ADMIN_PASSWORD` must
+be at least 16 characters. It guards the public page where you approve an
+assistant's access, so use a generated password. See
+[Configuration](#configuration) for every option.
+
+### 3. Start it
+
+```sh
+mkdir -p data backups && sudo chown 10001 data backups
+docker compose up -d --build
+docker compose logs -f
+```
+
+The first sync starts about 10 seconds after startup and pulls the last 90 days. Wait
+for `sync finished` in the logs.
+
+### 4. Make it reachable over HTTPS
+
+The app listens on `127.0.0.1:8000`. Put an HTTPS reverse proxy or tunnel in front of
+it that forwards these paths, with the original `Host` header:
+
+- `/garmin` and everything under it
+- `/.well-known/oauth-authorization-server/garmin`
+- `/.well-known/oauth-protected-resource/garmin` and everything under it
+
+The two `/.well-known/...` paths are where OAuth clients look for a server that lives
+under a path ([RFC 8414](https://www.rfc-editor.org/rfc/rfc8414) and
+[RFC 9728](https://www.rfc-editor.org/rfc/rfc9728)). The prefix lets the app share a
+hostname with other services. If you change it, change the path in `PUBLIC_BASE_URL`
+to match.
+
+It's safe to forward the whole prefix. The app only answers the MCP and OAuth routes
+under it and returns 404 for everything else.
+
+<details open>
+<summary><b>Tailscale Funnel</b></summary>
+
+```sh
+sh deploy/tailscale.sh
+```
+
+This gives you `https://<host>.<tailnet>.ts.net/garmin`. Set `PREFIX=/other` to use a
+different path.
+
+</details>
+
+<details>
+<summary><b>Caddy</b> (your own domain, automatic HTTPS)</summary>
+
+```caddy
+garmin.example.com {
+    @garmin path /garmin /garmin/* /.well-known/oauth-authorization-server/garmin /.well-known/oauth-protected-resource/garmin*
+    handle @garmin {
+        reverse_proxy 127.0.0.1:8000
+    }
+    respond 404
+}
+```
+
+</details>
+
+<details>
+<summary><b>nginx</b></summary>
+
+```nginx
+location /garmin { proxy_pass http://127.0.0.1:8000; proxy_set_header Host $host; }
+location /.well-known/oauth-authorization-server/garmin { proxy_pass http://127.0.0.1:8000; proxy_set_header Host $host; }
+location /.well-known/oauth-protected-resource/garmin { proxy_pass http://127.0.0.1:8000; proxy_set_header Host $host; }
+```
+
+</details>
+
+Check it from a device on **another network** (e.g. your phone without Wi-Fi):
+
+```sh
+curl https://<your-host>/.well-known/oauth-authorization-server/garmin
+```
+
+The response should contain `"issuer": "https://<your-host>/garmin"`.
+
+### 5. Connect your assistant
+
+**Claude.** Create an OAuth client on the server:
+
+```sh
+docker compose exec garmin-reasoner python -m garmin_reasoner.mcp_clients create
+```
+
+In claude.ai, go to **Settings → Connectors → Add custom connector**:
+
+- **URL:** `https://<your-host>/garmin/mcp`
+- **Advanced settings:** paste the Client ID and Secret that were printed.
+
+When you click Connect, an approval page opens. Check that it names Claude and a
+`claude.ai` callback, then enter your admin password. Done. Try asking Claude
+*"What Garmin data do you have access to?"*
+
+**Other MCP clients.** Any client that supports remote MCP servers over streamable HTTP
+with OAuth should work. For safety, only clients whose OAuth callback URL is on an
+allowlist can connect, and the default list holds only Claude's. Find your client's
+callback URL in its documentation and add it to `.env`, keeping Claude's if you use both:
+
+```sh
+MCP_ALLOWED_REDIRECT_URIS=["https://claude.ai/api/mcp/auth_callback","https://<your-client>/oauth/callback"]
+```
+
+Then run `docker compose up -d`, and add `https://<your-host>/garmin/mcp` as a connector
+in your client. Clients that register themselves need nothing else. For clients that
+ask for a Client ID and Secret, create them with the `mcp_clients create` command above.
+Clients that use a `localhost` callback on a random port, as some desktop and editor
+apps do, aren't supported yet.
+
+### 6. Load older history (optional)
+
+The first sync covers 90 days. To pull more, run the sync command on the machine:
+
+```sh
+docker compose exec garmin-reasoner python -m garmin_reasoner.sync 2025-01-01 2025-12-31
+```
+
+Add `--feeds sleeps hrv` to pull only some feeds. The command prints progress and
+finishes when everything is stored. History goes back as far as your first watch.
+
+## Configuration
+
+All settings are environment variables, read from `.env`.
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `GARMIN_API_KEY` | yes | | Personal API key from Garmin Connect. |
+| `GARMIN_API_KEY_EXPIRES` | | | Key expiry (`YYYY-MM-DD`). The log warns 14 days before it. |
+| `PUBLIC_BASE_URL` | yes | | Public HTTPS URL including the path prefix, e.g. `https://garmin.example.com/garmin`. Used as the OAuth issuer. |
+| `ADMIN_PASSWORD` | yes | | At least 16 characters. Approves an assistant's access on the connection approval page. |
+| `SYNC_INTERVAL_MINUTES` | | `60` | How often to sync. |
+| `SYNC_LOOKBACK_DAYS` | | `3` | Days before the last synced date that each sync re-pulls, to catch late uploads. |
+| `BACKUP_KEEP` | | `14` | Number of daily backups to keep. |
+| `JOBS_ENABLED` | | `true` | Turn the scheduled sync and backups off, e.g. for development. |
+| `MCP_ALLOWED_REDIRECT_URIS` | | claude.ai and claude.com callbacks | JSON list of OAuth callback URLs. Only MCP clients with these exact callbacks may connect. |
+| `DATABASE_PATH`, `BACKUP_DIR` | | set by Compose | Locations of the SQLite file and backups. |
+
+`deploy/tailscale.sh` also takes `PREFIX` (default `/garmin`, must match the path of
+`PUBLIC_BASE_URL`).
+
+## What the model can see
+
+All tools are read-only and take an inclusive date range (`start`, `end`) in your local
+calendar dates (`YYYY-MM-DD`).
+
+**Compact summaries (the model is told to use these first).** Flat rows with units in the key names,
+`null` for values that weren't recorded, and dates with no data listed in `missing`. For
+90 days of data, a response is 1–6k tokens, compared with 30–110k for the raw tools.
+
+| Tool | Max range | One row per |
 | --- | --- | --- |
-| `/garmin/mcp` | Funnel (public) | MCP server (streamable HTTP), bearer-token protected |
-| `/authorize`, `/token`, `/register`, `/revoke`, `/.well-known/*`, `/mcp-login` | Funnel | OAuth server for the claude.ai connector |
-| `POST /admin/sync` | tailnet only | Pull a historical range, e.g. `{"start": "2025-10-01", "end": "2026-10-24"}` (optional `"feeds": [...]`) |
-| `GET /healthz` | container only | Health check |
+| `get_period_stats(start, end, group_by)` | 366 days by `"week"`; unlimited by `"month"` or `"none"` | ISO week, calendar month, or the whole range |
+| `get_sleep_summary` | 93 days | night, dated by the morning it ends |
+| `get_daily_overview` | 93 days | day |
+| `get_activity_list` | 93 days | activity |
 
-## Data synced
+**Raw Garmin JSON (for detail).** `get_daily_summaries`, `get_sleep`, `get_hrv`,
+`get_stress`, `get_body_battery`, `get_weight` and `get_activities`, up to 93 days each.
+The model uses these to drill into details the summaries leave out, such as SpO2, splits or
+running dynamics.
+
+**`list_available_data`** shows what's stored and when each feed last synced.
+
+<details>
+<summary>Example outputs (made-up values)</summary>
+
+**`get_period_stats`**: averages, medians, counts and totals per period. The range is
+clipped to the dates that have data, so monthly stats from `2000-01-01` cover all of
+your history. `im_total` counts vigorous minutes twice, as Garmin's weekly intensity
+goal does.
+
+```json
+{"group_by":"week","start":"2026-10-12","end":"2026-10-25","count":2,"rows":[
+{"period":"2026-W42","start":"2026-10-12","end":"2026-10-18","days":7,"nights":7,"sleep_min_avg":431,"sleep_min_median":425,"sleep_score_avg":79,"sleep_score_median":82,"bedtime_avg":"01:12","bedtime_median":"00:57","resting_hr_avg":46,"resting_hr_median":46,"hrv_avg":64,"hrv_median":66,"steps_avg":7410,"steps_median":6980,"stress_avg":29,"stress_median":28,"nights_under_7h":3,"nights_under_6h":1,"activities":{"running":2,"hiking":1},"im_moderate":118,"im_vigorous":46,"im_total":210,"weight_first_kg":81.4,"weight_last_kg":81.0},
+{"period":"2026-W43","start":"2026-10-19","end":"2026-10-25","days":7,"nights":6,"sleep_min_avg":448,"sleep_min_median":451,"sleep_score_avg":86,"sleep_score_median":88,"bedtime_avg":"00:41","bedtime_median":"00:35","resting_hr_avg":45,"resting_hr_median":45,"hrv_avg":70,"hrv_median":71,"steps_avg":6820,"steps_median":7105,"stress_avg":26,"stress_median":25,"nights_under_7h":1,"nights_under_6h":0,"activities":{"running":2,"bouldering":1},"im_moderate":95,"im_vigorous":31,"im_total":157,"weight_first_kg":null,"weight_last_kg":null}
+]}
+```
+
+**`get_sleep_summary`**: `hrv` is the overnight average in ms. Bedtime and wake time
+are local wall-clock times, correct across DST changes, and bedtime averages pivot at
+noon, so 23:30 and 00:30 average to midnight.
+
+```json
+{"start":"2026-10-23","end":"2026-10-25","count":2,"missing":["2026-10-24"],"rows":[
+{"date":"2026-10-23","bedtime":"00:57","wake":"08:03","sleep_min":425,"deep_min":72,"light_min":250,"rem_min":103,"awake_min":12,"score":82,"avg_stress":14,"avg_hr":52,"avg_resp":14.1,"hrv":80,"nap_min":0},
+{"date":"2026-10-25","bedtime":"23:30","wake":"07:00","sleep_min":440,"deep_min":81,"light_min":262,"rem_min":97,"awake_min":10,"score":85,"avg_stress":12,"avg_hr":50,"avg_resp":13.8,"hrv":null,"nap_min":20}
+]}
+```
+
+**`get_daily_overview`**: steps, intensity minutes, Body Battery (`bb_*`), average
+stress (0–100) and that day's activities.
+
+```json
+{"start":"2026-10-22","end":"2026-10-23","count":2,"missing":[],"rows":[
+{"date":"2026-10-22","steps":8802,"floors":7,"resting_hr":42,"im_moderate":49,"im_vigorous":5,"active_kcal":650,"bb_max":100,"bb_min":20,"stress":30,"activities":["hiking 95min","running 27min"]},
+{"date":"2026-10-23","steps":5722,"floors":3,"resting_hr":44,"im_moderate":14,"im_vigorous":0,"active_kcal":258,"bb_max":95,"bb_min":24,"stress":25,"activities":[]}
+]}
+```
+
+**`get_activity_list`**: runs get `pace_min_km`, and other activities with a distance get
+`speed_kmh`. `z1_min`–`z5_min` are minutes in each heart rate zone.
+
+```json
+{"start":"2026-10-21","end":"2026-10-22","count":2,"rows":[
+{"start":"2026-10-21 10:11","type":"strength_training","name":"Strength","duration_min":41.0,"distance_km":null,"pace_min_km":null,"speed_kmh":null,"avg_hr":107,"max_hr":161,"elev_gain_m":null,"training_effect":"anaerobic_capacity","z1_min":16,"z2_min":8,"z3_min":2,"z4_min":0,"z5_min":0},
+{"start":"2026-10-22 14:35","type":"running","name":"Evening Run","duration_min":27.0,"distance_km":4.07,"pace_min_km":"6:39","speed_kmh":null,"avg_hr":164,"max_hr":177,"elev_gain_m":24,"training_effect":"lactate_threshold","z1_min":0,"z2_min":1,"z3_min":5,"z4_min":21,"z5_min":0}
+]}
+```
+
+</details>
+
+<details>
+<summary>Synced feeds and Garmin endpoints</summary>
 
 | Feed | Garmin endpoint | Max range per request |
 | --- | --- | --- |
@@ -27,180 +335,98 @@ See [CLAUDE.md](CLAUDE.md) for the architecture, and
 | `weight` | `weight-service/weight/range/{start}/{end}?includeAll=true` | 31 days (undocumented) |
 | `activities` | `activitylist-service/activities/search/activities` | 31 days, paged |
 
-The menstrual cycle and nutrition endpoints are deliberately not synced. Adding a feed
-takes one fetch function and one entry in `FEEDS` in `sync.py`.
+Menstrual cycle and nutrition endpoints are deliberately not synced.
 
-## MCP tools
+</details>
 
-All tools are read-only and take an inclusive `(start, end)` range of local dates
-(`YYYY-MM-DD`). There are two kinds:
+## Security
 
-- **Compact summaries** (`compact.py`) come first. Each one returns flat rows of compact
-  JSON, one row per line, with units in the key names. Fields with no recorded value are
-  `null`, and dates in the range with no data at all are listed in `missing`. For 90
-  days of real data each response is 1–6k tokens, against 30–110k for the raw tools.
-- **Raw Garmin JSON** (`get_sleep`, `get_daily_summaries`, `get_activities`, `get_hrv`,
-  `get_stress`, `get_body_battery`, `get_weight`) is for drilling into a few days for a
-  detail the summaries leave out, such as SpO2, splits or running dynamics.
+This is health data on the public internet, so the defaults are strict:
 
-`list_available_data` shows what's stored and when each feed last synced.
+- **Only the MCP and OAuth routes are public.** Under its prefix, the app answers 404
+  for anything other than `/mcp` and the OAuth flow. There is no admin API: admin tasks
+  are commands you run on the machine. The health check is only for the container.
+- **Every connection is approved by you** with the admin password, and only clients with an
+  allowed callback URL (`MCP_ALLOWED_REDIRECT_URIS`) may register. Failed logins are throttled.
+- **Tokens and codes are stored hashed**, refresh tokens rotate on use, and access tokens
+  last an hour.
+- **The model never sees** GPS coordinates or account and device identifiers (`HIDDEN_FIELDS`
+  in [`queries.py`](src/garmin_reasoner/queries.py)). They stay only in the raw store.
+- **Abuse limits:** capped client registrations, pending authorizations and request
+  sizes, plus strict security headers.
+- **Locked-down container:** it runs as a non-root user on a read-only filesystem, with
+  all capabilities dropped and only loopback port binding. The database and backups are
+  readable by their owner only.
+- **Secrets come only from environment variables**, and they are never logged or stored
+  in the database.
 
-| Tool | Max range | One row per |
-| --- | --- | --- |
-| `get_period_stats(start, end, group_by="week")` | 366 days by week; none by `"month"` or `"none"` | ISO week, calendar month, or the whole range (`"none"`) |
-| `get_sleep_summary(start, end)` | 93 days | night, dated by the morning it ends |
-| `get_daily_overview(start, end)` | 93 days | day |
-| `get_activity_list(start, end)` | 93 days | activity |
-| raw `get_*` tools | 93 days | Garmin record |
+Found a security problem? Please report it privately through
+[GitHub's security advisories](https://github.com/ranuru/garmin-reasoner/security/advisories/new)
+rather than in a public issue.
 
-Bedtime and wake time are the local wall-clock time at each end of the night, so a
-night across a DST change gets the right time at both ends. Bedtime averages pivot at
-noon, so 23:30 and 00:30 average to midnight. Today's row is usually incomplete.
+## Operations
 
-The example outputs below use made-up values.
+- **Sync** runs every `SYNC_INTERVAL_MINUTES`. Each run re-pulls a few days before the
+  last synced date, so late uploads and outages (up to 90 days) heal on their own. Ask
+  your assistant to run `list_available_data` to see the last sync time and any error per feed.
+- **Rotating the API key:** keys last up to a year. Create a new one, update `.env`, and
+  run `docker compose up -d`.
+- **Backups:** a consistent copy goes to `backups/` every day. Run one by hand with
+  `docker compose exec garmin-reasoner python -m garmin_reasoner.backup`. Copy backups
+  somewhere off the machine, because they are the only copy of your history. They're
+  owned by the container user, so copy them with `sudo`.
+- **Managing connections:** `python -m garmin_reasoner.mcp_clients list` shows clients,
+  and `delete <id>` removes one and revokes its tokens. Run both with
+  `docker compose exec garmin-reasoner`.
+- **Updating:** `git pull && docker compose up -d --build`. Database migrations run
+  automatically on startup.
 
-**`get_period_stats`**: averages and medians, counts, and totals per period. The range
-is clipped to the first and last date that has data, so monthly or `"none"` stats from
-e.g. `2000-01-01` cover all stored history (a month row is about 200 tokens). Periods at
-the ends of the range are clipped too (see `days`). `im_total` counts vigorous minutes
-twice, as Garmin's weekly intensity goal does.
+## Troubleshooting
 
-```json
-{"group_by":"week","start":"2026-10-12","end":"2026-10-25","count":2,"rows":[
-{"period":"2026-W42","start":"2026-10-12","end":"2026-10-18","days":7,"nights":7,"sleep_min_avg":431,"sleep_min_median":425,"sleep_score_avg":79,"sleep_score_median":82,"bedtime_avg":"01:12","bedtime_median":"00:57","resting_hr_avg":46,"resting_hr_median":46,"hrv_avg":64,"hrv_median":66,"steps_avg":7410,"steps_median":6980,"stress_avg":29,"stress_median":28,"nights_under_7h":3,"nights_under_6h":1,"activities":{"running":2,"hiking":1},"im_moderate":118,"im_vigorous":46,"im_total":210,"weight_first_kg":81.4,"weight_last_kg":81.0},
-{"period":"2026-W43","start":"2026-10-19","end":"2026-10-25","days":7,"nights":6,"sleep_min_avg":448,"sleep_min_median":451,"sleep_score_avg":86,"sleep_score_median":88,"bedtime_avg":"00:41","bedtime_median":"00:35","resting_hr_avg":45,"resting_hr_median":45,"hrv_avg":70,"hrv_median":71,"steps_avg":6820,"steps_median":7105,"stress_avg":26,"stress_median":25,"nights_under_7h":1,"nights_under_6h":0,"activities":{"running":2,"bouldering":1},"im_moderate":95,"im_vigorous":31,"im_total":157,"weight_first_kg":null,"weight_last_kg":null}
-]}
-```
+| Symptom | Fix |
+| --- | --- |
+| `cannot write to /app/data (running as uid 10001)` at startup | `sudo chown -R 10001 data backups` |
+| `API key exchange failed: HTTP 401` in the logs | The key is wrong or expired. Create a new one. |
+| The assistant can't connect | Run the discovery `curl` from step 4 from another network. `PUBLIC_BASE_URL` must match the public URL exactly, including `/garmin`, and the proxy must pass the original `Host` header. |
+| The approval page says the request is unknown or expired | Approval requests last 10 minutes. Start the connection again from your assistant. |
+| `Too many attempts; try later.` | Ten failed passwords lock the page for 15 minutes. |
 
-**`get_sleep_summary`**: `hrv` is the overnight average in ms, joined from the HRV
-feed. A night with HRV but no sleep record still gets a row.
+<details>
+<summary>Garmin API quirks</summary>
 
-```json
-{"start":"2026-10-23","end":"2026-10-25","count":2,"missing":["2026-10-24"],"rows":[
-{"date":"2026-10-23","bedtime":"00:57","wake":"08:03","sleep_min":425,"deep_min":72,"light_min":250,"rem_min":103,"awake_min":12,"score":82,"avg_stress":14,"avg_hr":52,"avg_resp":14.1,"hrv":80,"nap_min":0},
-{"date":"2026-10-25","bedtime":"23:30","wake":"07:00","sleep_min":440,"deep_min":81,"light_min":262,"rem_min":97,"awake_min":10,"score":85,"avg_stress":12,"avg_hr":50,"avg_resp":13.8,"hrv":null,"nap_min":20}
-]}
-```
+Learned against the live API. Garmin's spec isn't always right.
 
-**`get_daily_overview`**: intensity minutes, Body Battery (`bb_*`) and average stress
-(0–100), plus that day's activities.
+- The key exchange returns the access token as a bare JWT (`text/plain`), valid 24h by
+  its `exp` claim, and it's sent as `Authorization: Bearer <token>`.
+- `weight/all` answers HTTP 400 for valid ranges, so weight uses
+  `weight/range?includeAll=true`. Weight values are in **grams**, not kilograms.
+- Body Battery returns an empty report for every date asked for, including days before
+  your first watch. The sync skips those.
+- Date-range limits for HRV, weight and activities, and rate limits, are undocumented.
+  The client uses conservative chunks and retries 429 and 5xx responses with backoff,
+  honouring `Retry-After`.
 
-```json
-{"start":"2026-10-22","end":"2026-10-23","count":2,"missing":[],"rows":[
-{"date":"2026-10-22","steps":8802,"floors":7,"resting_hr":42,"im_moderate":49,"im_vigorous":5,"active_kcal":650,"bb_max":100,"bb_min":20,"stress":30,"activities":["hiking 95min","running 27min"]},
-{"date":"2026-10-23","steps":5722,"floors":3,"resting_hr":44,"im_moderate":14,"im_vigorous":0,"active_kcal":258,"bb_max":95,"bb_min":24,"stress":25,"activities":[]}
-]}
-```
-
-**`get_activity_list`**: runs get `pace_min_km`, and other activities with a distance get
-`speed_kmh`. `z1_min`–`z5_min` are the minutes in each heart rate zone.
-
-```json
-{"start":"2026-10-21","end":"2026-10-22","count":2,"rows":[
-{"start":"2026-10-21 10:11","type":"strength_training","name":"Strength","duration_min":41.0,"distance_km":null,"pace_min_km":null,"speed_kmh":null,"avg_hr":107,"max_hr":161,"elev_gain_m":null,"training_effect":"anaerobic_capacity","z1_min":16,"z2_min":8,"z3_min":2,"z4_min":0,"z5_min":0},
-{"start":"2026-10-22 14:35","type":"running","name":"Evening Run","duration_min":27.0,"distance_km":4.07,"pace_min_km":"6:39","speed_kmh":null,"avg_hr":164,"max_hr":177,"elev_gain_m":24,"training_effect":"lactate_threshold","z1_min":0,"z2_min":1,"z3_min":5,"z4_min":21,"z5_min":0}
-]}
-```
+</details>
 
 ## Development
 
-Requires [uv](https://docs.astral.sh/uv/).
+Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
 ```sh
-cp .env.example .env    # fill in values
 uv sync                 # install dependencies
-uv run pytest           # run tests
+uv run pytest           # run the tests
 uv run ruff check .     # lint
 uv run uvicorn garmin_reasoner.main:create_app --factory --reload
 ```
 
-## Deploy (home server)
+For local development, `PUBLIC_BASE_URL=https://localhost` works until a proxy is set
+up. Adding a Garmin feed takes one fetch function and one entry in `FEEDS` in
+[`sync.py`](src/garmin_reasoner/sync.py).
 
-1. **Create an API key.** In Garmin Connect on the web, go to Settings → Personal API Key.
-   Copy it into `.env` as `GARMIN_API_KEY` (it's shown only once), and put the expiry date
-   you chose in `GARMIN_API_KEY_EXPIRES`.
-2. **Configure the rest.** `cp .env.example .env` and fill it in. `PUBLIC_BASE_URL` is the
-   server's Funnel URL (`https://<host>.<tailnet>.ts.net`). `ADMIN_PASSWORD` must be at least
-   16 characters. It guards the public `/mcp-login` page, so use a generated one.
-3. **Run.**
-
-   ```sh
-   mkdir -p data backups && sudo chown 10001 data backups
-   docker compose up -d --build
-   docker compose logs -f
-   ```
-
-   The first sync starts 10 seconds after startup and pulls the last 90 days. Look for
-   `sync finished` in the logs.
-4. **Expose via Tailscale.** `sh deploy/tailscale.sh`. This puts the app on Funnel
-   port 443 under `/garmin`, with `/admin` on tailnet-only Serve (port 8443). Set
-   `PUBLIC_BASE_URL=https://<host>.<tailnet>.ts.net/garmin`. Check with
-   `tailscale funnel status`.
-
-   The path prefix lets the app share the hostname with something that owns `/`, such as
-   Home Assistant, and claude.ai only connects on port 443. OAuth discovery for a
-   prefixed server lives at `/.well-known/oauth-authorization-server/garmin`, so it
-   doesn't collide with the other app's `/.well-known/oauth-authorization-server`.
-   Check from outside the tailnet:
-   `curl https://<host>.<tailnet>.ts.net/.well-known/oauth-authorization-server/garmin`
-   should show `"issuer": "https://<host>.<tailnet>.ts.net/garmin"`.
-5. **Load older history** (optional; up to 366 days per call):
-
-   ```sh
-   curl -u admin:$ADMIN_PASSWORD -H 'Content-Type: application/json' \
-     https://<host>.<tailnet>.ts.net:8443/admin/sync \
-     -d '{"start": "2025-07-01", "end": "2026-07-27"}'
-   ```
-
-6. **Add to Claude.** Create an OAuth client on the server:
-
-   ```sh
-   docker compose exec garmin-reasoner python -m garmin_reasoner.mcp_clients create
-   ```
-
-   In claude.ai → Settings → Connectors → Add custom connector, use the URL
-   `https://<host>.<tailnet>.ts.net/garmin/mcp`. Paste the printed Client ID and Secret under
-   **Advanced settings**. When you connect, `/mcp-login` opens: check that it names Claude
-   and a `claude.ai` callback, then enter the admin password. (`... mcp_clients list` /
-   `delete <id>` manage clients; deleting one revokes its tokens.)
-
-## Operations
-
-- **Sync** runs every `SYNC_INTERVAL_MINUTES` (default 60). For each feed it re-pulls from
-  `SYNC_LOOKBACK_DAYS` days before the last synced date up to tomorrow. That picks up late
-  watch uploads, and after an outage it catches up on its own (up to 90 days back).
-  Claude's `list_available_data` tool shows the last sync time and error for each feed.
-- **Rotating the API key:** keys last up to a year. The log warns 14 days before
-  `GARMIN_API_KEY_EXPIRES`. Create a new key, update `.env`, and run
-  `docker compose up -d`.
-- **Backups:** every day the app writes a consistent copy to `backups/`, keeping the newest
-  `BACKUP_KEEP`. Run one by hand with
-  `docker compose exec garmin-reasoner python -m garmin_reasoner.backup`. Copy `backups/`
-  somewhere else, such as another machine or encrypted cloud storage. Backups contain
-  health data. MCP tokens are only stored hashed, and the Garmin key is never in the
-  database.
-- **Privacy:** activities' GPS start/end coordinates and account identifiers are kept in
-  the raw data but never returned to Claude (`HIDDEN_FIELDS` in `queries.py`).
-
-## API quirks
-
-Learned against the live API; the spec (`docs/garmin-personal-api.json`) isn't always
-right.
-
-- The key exchange returns the access token as a bare JWT (`text/plain`), valid 24h by
-  its `exp` claim. It is sent as `Authorization: Bearer <token>`.
-- Every feed works. `weight/all` answers HTTP 400 (with an empty body) for valid ranges,
-  so weight uses `weight/range?includeAll=true` instead.
-- Weight values come in **grams**, despite the spec saying kilograms.
-- Body Battery returns a report for every date asked for, including days before the
-  first watch, with every value null. The sync skips those (migration 7 removed ones
-  stored earlier).
-- History reaches back to the first watch: a year further back returns no records.
-
-Still undocumented: date-range limits for HRV, weight and activities (the client uses
-conservative chunks), and rate limits (429 and 5xx responses are retried with backoff,
-honouring `Retry-After`).
+This is primarily a personal project, but issues and pull requests are welcome. Please
+include tests with code changes.
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). Garmin and Garmin Connect are trademarks of Garmin Ltd. Claude is a
+trademark of Anthropic.

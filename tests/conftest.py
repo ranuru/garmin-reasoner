@@ -82,10 +82,5 @@ def client(make_client: Callable[..., TestClient]) -> TestClient:
 
 
 @pytest.fixture
-def admin_auth() -> tuple[str, str]:
-    return ("admin", ADMIN_PASSWORD)
-
-
-@pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
